@@ -1,0 +1,44 @@
+      298  - **Files:**
+      299    - Create `docs/research/2026-10-09-ai-engineering-experts/findings.md`: me
+           thod, X verdict, shortage-test result, cost, limitations, the evidence a sec
+           ond run would need, and the proposal table.
+      300  - **Approach:**
+  ⎿  Allowed by auto mode classifier
+
+● All the authorized corrections are applied. Next I'm saving the resolved review evidence and
+  committing, then asking for the remaining decisions.
+
+  Ran 1 shell command
+
+● The plan review is complete and committed as 891a93f on PR #309's branch (not yet pushed),
+  with 8 corrections applied covering equal selection, isolated answers, synthetic consult
+  logging, verdict timing, stopped runs, and smaller fixes. Three Astra-only fixes and one
+  decision still need your confirmation, while six FYIs, one residual concern, and three
+  rejected GLM suggestions are documented in the review evidence.
+──────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Third arm  ☒ Proposed  ✔ Submit  →
+
+│ Three proposed fixes came only from the cross-model Astra peer (or touch a settled entry's
+│ wording), so they need your confirmation before they land. Which should I apply?
+
+❯ 1. [✔] Retrieval-health checks
+         P1. A failed library lookup currently exits 0, and semantic failures fall back to
+         lexical-only, so it can read as 'library has nothing'. That inflates novelty grades
+         and empties the library arm. Fix: record retrieval health with each consult, withhold
+         A credit on a failed lookup, and require all 10 library evidence sets to pass before
+         the gate is computed.
+  2. [ ] One item per harvest row
+         P2. The cap of about 5 is checked against proposal rows, but one row can hold several
+         items. Fix: each harvest row names exactly one source item, and the cap is checked
+         on items in both the proposal and the ingest payload.
+  3. [ ] X-test exception wording
+         P2. The 'experts are the unit' Key Decision says X is read only where it's a person's
+         best channel, but the X test reads it for all three seeds. Fix: name the X test as
+         the one exception in that entry's rule text. The session-settled annotation is
+         untouched.
+  4. [ ] Type something
+     Submit
+──────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

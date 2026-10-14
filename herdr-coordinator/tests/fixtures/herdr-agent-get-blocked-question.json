@@ -1,0 +1,28 @@
+{
+ "id": "cli:agent:get",
+ "result": {
+  "agent": {
+   "agent": "claude",
+   "agent_session": {
+    "agent": "claude",
+    "kind": "id",
+    "source": "herdr:claude",
+    "value": "5efe44ac-416c-4d1e-9b97-340151353ffd"
+   },
+   "agent_status": "blocked",
+   "cwd": "<cwd>",
+   "focused": false,
+   "interactive_ready": true,
+   "name": "u1probe",
+   "pane_id": "wJ:p1",
+   "revision": 3,
+   "state_change_seq": 1555,
+   "tab_id": "wJ:t1",
+   "terminal_id": "term_65d320b8c7db338",
+   "terminal_title": "\u2733 Probe herdr-u1",
+   "terminal_title_stripped": "Probe herdr-u1",
+   "workspace_id": "wJ"
+  },
+  "type": "agent_info"
+ }
+}

@@ -1,0 +1,22 @@
+{
+ "id": "cli:agent:get",
+ "result": {
+  "agent": {
+   "agent": "claude",
+   "agent_status": "idle",
+   "cwd": "<cwd>",
+   "focused": false,
+   "interactive_ready": true,
+   "name": "u1probe",
+   "pane_id": "wJ:p1",
+   "revision": 2,
+   "state_change_seq": 1543,
+   "tab_id": "wJ:t1",
+   "terminal_id": "term_65d320b8c7db338",
+   "terminal_title": "\u2733 Claude Code",
+   "terminal_title_stripped": "Claude Code",
+   "workspace_id": "wJ"
+  },
+  "type": "agent_info"
+ }
+}
