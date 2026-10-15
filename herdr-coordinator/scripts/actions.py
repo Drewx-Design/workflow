@@ -117,6 +117,32 @@ def visible_text(worker, ops, default=""):
     return (text.rstrip() or default) if isinstance(text, str) else default
 
 
+def question_text(worker, ops, records, default="Question text unavailable"):
+    """The open form from the transcript first, then the pane as herdr shows it.
+
+    The pane often starts with earlier output (such as a message the coordinator sent), which
+    reads like the question itself; the form's own wording leads so the coordinator sees it first.
+    """
+    screen = visible_text(worker, ops, default="")
+    form = transcript.open_form_questions(records)
+    if not form:
+        return screen or default
+    lines = ["Form (from the worker's transcript):"]
+    for question in form:
+        header = question.get("header")
+        lines.append(f"[{header}] {question.get('question')}" if header else str(question.get("question")))
+        if question.get("multiSelect"):
+            lines.append("(multi-select)")
+        options = question.get("options")
+        for number, option in enumerate(options if isinstance(options, list) else [], 1):
+            if isinstance(option, dict):
+                description = option.get("description")
+                lines.append(f"  {number}. {option.get('label')}" + (f": {description}" if description else ""))
+    if screen:
+        lines += ["", "Worker screen (lines above the form can be earlier output):", screen]
+    return "\n".join(lines)
+
+
 def refresh_session(worker, agent, *, now=None):
     session = (agent.get("agent_session") or {}).get("value")
     if not isinstance(session, str) or not session or session == worker.get("session_id"):
@@ -507,7 +533,7 @@ def resume(name, *, ops=adapters, action_id=None):
 
             registry.update(not_sent)
             try:
-                text = visible_text(worker, ops, default="Question text unavailable")
+                text = question_text(worker, ops, records_for(worker, ops))
             except (ActionError, OSError, TimeoutError):
                 text = "Question text unavailable"
             change_worker(worker["worker_id"], "question", question_text=text)

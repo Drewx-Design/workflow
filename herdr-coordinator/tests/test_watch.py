@@ -147,6 +147,36 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(self.ops.notifications[0][4], self.ops.visible.rstrip())
         self.assertFalse(self.ops.sends)
 
+    def test_question_text_leads_with_the_open_form_not_earlier_pane_output(self):
+        # Live use: the pane began with the coordinator's own earlier message, so the
+        # form at the bottom read as an echo and the worker waited 80 minutes on an unseen question.
+        ask = json.loads((FIXTURES / "askuserquestion-before-answer.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        form = ask["message"]["content"][0]["input"]["questions"][0]
+        self.ops.visible = "› Message from @coordinator: hold the filing\n\n" + form["question"]
+        self.seed_records([PROMPT, ask])
+        events = watch.poll_once(ops=self.ops, now=100)
+        questions = [event for event in events
+                     if event["kind"] == "worker_state" and event["payload"]["state"] == "question"]
+        self.assertEqual(len(questions), 1)
+        text = questions[0]["payload"]["question_text"]
+        first_lines = text.split("\n\n")[0]
+        self.assertTrue(text.startswith("Form (from the worker's transcript):"))
+        self.assertIn(f"[{form['header']}] {form['question']}", first_lines)
+        for number, option in enumerate(form["options"], 1):
+            self.assertIn(f"  {number}. {option['label']}: {option['description']}", first_lines)
+        self.assertNotIn("Message from @coordinator", first_lines)
+        # The screen still follows, for anything the transcript does not carry.
+        self.assertTrue(text.endswith(self.ops.visible))
+        self.assertFalse(self.ops.sends)
+        # An answered form no longer leads: only the screen is shown.
+        answered = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": ask["message"]["content"][0]["id"], "content": "answered"}]}}
+        self.assertEqual(actions.question_text(self.worker, self.ops, [PROMPT, ask, answered]), self.ops.visible)
+        # A malformed form falls back to the screen instead of failing.
+        broken = copy.deepcopy(ask)
+        broken["message"]["content"][0]["input"]["questions"] = 1
+        self.assertEqual(actions.question_text(self.worker, self.ops, [PROMPT, broken]), self.ops.visible)
+
     def test_legacy_status_only_reports_question(self):
         original = self.ops.herdr
 

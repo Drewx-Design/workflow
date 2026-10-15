@@ -613,7 +613,7 @@ def _poll_worker(worker, ops, now, keepalive=None):
         actions.change_worker(worker["worker_id"], "waiting_background", now=now, expected=state)
     elif observed.state == "question":
         if state != "question":
-            text = actions.visible_text(worker, ops, default="Question text unavailable")
+            text = actions.question_text(worker, ops, records)
             actions.change_worker(worker["worker_id"], "question", now=now, expected=state, question_text=text)
     elif observed.state == "quota_wait":
         # The index distinguishes separate 429s even when their wording/reset is identical.

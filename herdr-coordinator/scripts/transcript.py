@@ -202,7 +202,7 @@ def open_form_questions(records: list[dict]) -> list[dict]:
             if block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
                 tool_input = block.get("input")
                 questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
-                forms[block.get("id")] = [q for q in questions or [] if isinstance(q, dict)]
+                forms[block.get("id")] = [q for q in questions if isinstance(q, dict)] if isinstance(questions, list) else []
             elif block.get("type") == "tool_result":
                 forms.pop(block.get("tool_use_id"), None)
     return list(forms.values())[-1] if forms else []
