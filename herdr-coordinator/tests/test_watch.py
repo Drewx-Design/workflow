@@ -921,7 +921,9 @@ class WatchTests(unittest.TestCase):
         worker = registry.load()["workers"]["worker"]
         self.assertEqual(worker["state"], "done")
         self.assertEqual(worker["pr"], 286)
-        self.assertEqual(worker["pending_action_id"], action["id"])
+        # The worker replied after the nudge, so the nudge is moot and no longer blocks sends.
+        self.assertNotIn("pending_action_id", worker)
+        self.assertEqual(registry.load()["actions"][action["id"]]["status"], "superseded")
         self.assertEqual([(e["payload"]["state"], e["payload"]["pr"])
                           for e in events if e["kind"] == "worker_state"], [("done", 286)])
         self.assertEqual(len(self.ops.verify_calls), 1)
@@ -1116,27 +1118,73 @@ class WatchTests(unittest.TestCase):
                 self.assertFalse(self.ops.sends)
                 registry.update(lambda doc: doc["workers"].pop("queued-2"))
 
-    def test_unknown_action_blocks_queued_relay_until_confirmed(self):
+    def test_unknown_action_holds_its_relay_but_not_the_queue(self):
+        # Live use: a relay waiting behind an unconfirmed send kept three queued
+        # issues from starting for over an hour. The relay waits; the queue does not.
         self.seed_records([PROMPT])
         action = self.seed_unknown_nudge()
         self.set_state("relay_pending", relay_request={"action_id": "relay-1", "text": "Continue", "state_token": "worker-state"})
-        registry.update(lambda doc: doc["config"].update(cap=1))
+        registry.update(lambda doc: doc["config"].update(cap=2))
         self.queue()
         with mock.patch.object(actions, "relay", wraps=actions.relay) as relay, mock.patch.object(start, "_run_worker") as starter:
             watch.poll_once(ops=self.ops, now=100)
             watch.poll_once(ops=self.ops, now=101)
             relay.assert_not_called()
-            starter.assert_not_called()
+            # The queued issue started (the mocked start is continued on each poll).
+            self.assertEqual({call.args[0]["worker_id"] for call in starter.call_args_list}, {"queued-2"})
+            self.assertEqual(registry.load()["queue"], [])
             self.assertFalse(self.ops.sends)
             record = copy.deepcopy(PROMPT)
             record["message"]["content"] = action["text"]
             self.ops.write("session-1", [record], append=True)
             watch.poll_once(ops=self.ops, now=102)
             relay.assert_called_once()
-            starter.assert_not_called()
         self.assertEqual(self.ops.sends[0][2:], ("worker", "Continue"))
-        self.assertEqual(len(registry.load()["queue"]), 1)
         self.assertEqual(len(self.ops.notifications), 1)
+
+    def test_moot_nudge_frees_the_worker_for_relays(self):
+        # Live use: a stall nudge never reached the transcript, the workers
+        # carried on, and every later relay was refused as "Previous action delivery is unknown".
+        self.seed_records([PROMPT])
+        nudge = self.seed_unknown_nudge()
+        self.set_state("relay_pending", relay_request={"action_id": "relay-1", "text": "Yes", "state_token": "worker-state"})
+        self.ops.write("session-1", [END], append=True)
+        watch.poll_once(ops=self.ops, now=100)
+        self.assertEqual(registry.load()["actions"][nudge["id"]]["status"], "superseded")
+        self.assertEqual(self.ops.sends[0][2:], ("worker", "Yes"))
+
+    def test_only_a_nudge_is_settled_by_a_later_reply(self):
+        # Decision table: kind x what followed the send -> settled. Producer fixtures supply
+        # the API-error record and the form-opening record.
+        api_error = next(json.loads(line) for line in
+                         (FIXTURES / "api-error-429-sequence.jsonl").read_text(encoding="utf-8").splitlines()
+                         if json.loads(line).get("isApiErrorMessage"))
+        form = json.loads((FIXTURES / "askuserquestion-before-answer.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        cases = (("nudge", [END], "superseded"), ("nudge", [], "delivery_unknown"),
+                 ("nudge", [api_error], "delivery_unknown"), ("nudge", [form], "delivery_unknown"),
+                 ("relay", [END], "delivery_unknown"), ("resume", [END], "delivery_unknown"))
+        for kind, after, expected in cases:
+            with self.subTest(kind=kind, after=[r.get("type") for r in after]):
+                self.seed_records([PROMPT])
+                action = self.seed_unknown_nudge()
+                registry.update(lambda doc: doc["actions"][action["id"]].update(kind=kind, status="delivery_unknown"))
+                before = registry.load()["event_seq"]
+                result = actions.settle_moot_nudge(action["id"], [PROMPT, *after])
+                self.assertEqual(result["status"], expected)
+                worker = registry.load()["workers"]["worker"]
+                self.assertEqual("pending_action_id" in worker, expected == "delivery_unknown")
+                superseded = [e for e in registry.read_events(before) if e["kind"] == "action_superseded"]
+                self.assertEqual(len(superseded), int(expected == "superseded"))
+
+    def test_finished_worker_settles_a_moot_nudge(self):
+        self.seed_records([PROMPT])
+        nudge = self.seed_unknown_nudge()
+        self.set_state("done")
+        self.ops.write("session-1", [END], append=True)
+        watch.poll_once(ops=self.ops, now=100)
+        self.assertEqual(registry.load()["actions"][nudge["id"]]["status"], "superseded")
+        self.assertNotIn("pending_action_id", registry.load()["workers"]["worker"])
+        self.assertFalse(self.ops.notifications)
 
     def test_first_stall_nudges_second_stall_notifies_without_send(self):
         self.seed_records([PROMPT, TOOL, RESULT])

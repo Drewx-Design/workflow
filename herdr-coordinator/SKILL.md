@@ -64,13 +64,13 @@ For `worker_state` events (and `worker_start_failed`, which carries the same pay
 States you may see in `status` without an event to act on: `queued` (waiting for a slot), `starting`, `running`, `in_tool`, `awaiting_checks`, `awaiting_merge`, `cleaned`.
 
 Other events:
-- `delivery_unknown`: a send could not be confirmed. Tell the user which worker; never resend it yourself.
+- `delivery_unknown`: a send could not be confirmed. Tell the user which worker; never resend it yourself. While it is unknown, further sends to that worker are refused ("Previous action delivery is unknown"). An unconfirmed nudge clears itself once the worker replies, since it is then moot; a relay or resume stays unknown until the transcript confirms it. A relay waiting behind one does not hold up queued issues.
 - `send_refused`: the watcher refused its own automatic send (a relay, nudge or resume) before sending anything, usually because the worker's state changed. Nothing reached the worker. Tell the user once if the same worker repeats it.
 - `technical_problem`: the watcher hit an error it is retrying. Tell the user once if the same worker repeats it.
 - `watcher_slow`: a poll ran long but the watcher is alive. Mention it once; no hold is opened.
 - `watcher_exit`: the watcher stopped after repeated failures. Tell the user, then run `python $hc launch-watcher`; see "Holds".
 - `watcher_hung`: the watcher process is alive but has not polled for over ten minutes. Tell the user its pid; they decide whether to end that process, after which `launch-watcher` starts a fresh one.
-- `action_superseded`: a worker's session changed before an answer was confirmed, so that answer was dropped and will not be sent. Tell the user which worker and what text; if the question is still open, they can answer again.
+- `action_superseded`: a worker's session changed before an answer was confirmed, so that answer was dropped and will not be sent. Tell the user which worker and what text; if the question is still open, they can answer again. With `"kind": "nudge"` it is only bookkeeping (an unconfirmed nudge the worker no longer needs): acknowledge it without telling the user.
 - `action_delivered`, `session_changed`, `entry_action_recorded`, and similar are bookkeeping; acknowledge them without telling the user.
 
 When a command prints `{"state": "refused", "detail": ...}`, tell the user the detail instead of retrying.

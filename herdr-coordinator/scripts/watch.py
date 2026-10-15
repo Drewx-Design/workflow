@@ -506,7 +506,9 @@ def _poll_worker(worker, ops, now, keepalive=None):
             if worker["state"] in REOPENABLE_STATES and worker.get("session_id"):
                 _settled_offset(worker)  # anchor before this read moves the offset
             records, _ = _read(worker, ops, now)
-            actions.reconcile_action(worker["pending_action_id"], ops=ops, records=records)
+            pending = actions.reconcile_action(worker["pending_action_id"], ops=ops, records=records)
+            if pending["status"] == "delivery_unknown":
+                actions.settle_moot_nudge(worker["pending_action_id"], records)
         if worker["state"] in REOPENABLE_STATES and worker.get("session_id"):
             _reopen_if_in_use(registry.load()["workers"][worker["worker_id"]], ops, now)
         return
@@ -562,6 +564,8 @@ def _poll_worker(worker, ops, now, keepalive=None):
     delivery_unknown = False
     if pending_id:
         pending = actions.reconcile_action(pending_id, ops=ops, records=records)
+        if pending["status"] == "delivery_unknown":
+            pending = actions.settle_moot_nudge(pending_id, records)
         delivery_unknown = pending["status"] == "delivery_unknown"
         if delivery_unknown:
             actions.report_delivery_unknown(pending_id)
@@ -666,7 +670,9 @@ def _drain(ops, keepalive=None):
             return
         pending = registry.load()["actions"].get(worker.get("pending_action_id"), {})
         if pending.get("status") == "delivery_unknown":
-            return  # Preserve relay priority without admitting another send to this worker.
+            # This relay waits on the user (delivery_unknown was reported); queued issues must not
+            # wait behind it indefinitely, so skip it rather than stop draining.
+            continue
         request = worker["relay_request"]
         if keepalive:
             keepalive()

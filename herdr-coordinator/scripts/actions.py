@@ -288,6 +288,44 @@ def reconcile_action(action_id, *, ops=adapters, records=None):
     return registry.load()["actions"][action_id]
 
 
+def settle_moot_nudge(action_id, records):
+    """Drop an unconfirmed nudge once the worker has carried on without it.
+
+    A nudge only asks a quiet worker to continue. When the worker has written a main-thread
+    reply since the send, the nudge is moot whether or not it landed, and keeping it pending
+    blocks every later send to that worker (and, behind a pending relay, the repository's queue).
+    A late arrival of the generic nudge text is harmless, except into an open form, where it
+    could become an answer: while a form is open the nudge stays unknown. Other kinds stay
+    unknown: a relay carries the user's words and must never be sent twice.
+    """
+    action = registry.load()["actions"][action_id]
+    if action["status"] != "delivery_unknown" or action.get("kind") != "nudge":
+        return action
+    position = action.get("transcript_position", len(records))
+    replied = any(index >= position and transcript._is_role(record, "assistant")
+                  and not record.get("isApiErrorMessage")  # a synthetic API error is not a reply
+                  for index, record in transcript._main_records(records))
+    if not replied or transcript.open_form_questions(records):
+        return action
+
+    def settle(doc, events):
+        current = doc["actions"][action_id]
+        worker = doc["workers"][current["worker_id"]]
+        if current["status"] != "delivery_unknown" or current.get("session_id") != worker.get("session_id"):
+            return
+        current.update(status="superseded", reason="Worker continued without it; the nudge is no longer needed")
+        if worker.get("pending_action_id") == action_id:
+            worker.pop("pending_action_id")
+        # Non-alerting: notifications go out only for a superseded relay.
+        events.append(("action_superseded", {"action_id": action_id, "worker_id": worker["worker_id"],
+                                             "agent_name": worker.get("agent_name"), "kind": "nudge",
+                                             "text": current.get("text"), "session_id": current.get("session_id"),
+                                             "reason": current["reason"]}))
+
+    registry.update_with_events(settle)
+    return registry.load()["actions"][action_id]
+
+
 def _existing(action_id, worker, kind, text, ops):
     action = registry.load()["actions"].get(action_id)
     if action is None:
