@@ -74,7 +74,10 @@ def read_records(path: str | Path, offset: int = 0) -> tuple[list[dict], int]:
 
 def _main_records(records):
     for index, record in enumerate(records):
-        if isinstance(record, dict) and record.get("isSidechain", False) is False:
+        # A compaction (even one while idle, seen live 2026-10-15) writes its summary as a user
+        # record after the turn ended; it is nobody's prompt, so it never opens a turn.
+        if (isinstance(record, dict) and record.get("isSidechain", False) is False
+                and record.get("isCompactSummary") is not True):
             yield index, record
 
 
@@ -213,7 +216,7 @@ def _drop_untaken_notices(records):
     end = len(records)
     for index in range(len(records) - 1, -1, -1):
         record = records[index]
-        if record.get("isSidechain", False) is not False:
+        if record.get("isSidechain", False) is not False or record.get("isCompactSummary") is True:
             continue
         if _is_role(record, "assistant"):
             break

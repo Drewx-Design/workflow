@@ -42,6 +42,7 @@ class FakeOps:
         self.start_errors = []
         self.prompt_error = None
         self.confirm = True
+        self.drop_prompts = 0  # prompts typed before Claude takes input: no transcript at all
         self.pasted_entry = False
         self.recorded_mode = "auto"
         self.session_polls = 0
@@ -116,6 +117,9 @@ class FakeOps:
                 error = self.prompt_error
                 self.prompt_error = None
                 return failure(error)
+            if self.drop_prompts:
+                self.drop_prompts -= 1
+                return success()
             self.write_transcript(args[2], args[3])
             return success()
         if args[:2] == ("agent", "get"):
@@ -569,6 +573,70 @@ class StartTests(unittest.TestCase):
         self.assertEqual(registry.load()["actions"][worker["action_id"]]["status"], "delivery_unknown")
         start.start_issues(self.repo, [1], ops=self.ops)
         self.assertEqual(len(self.ops.prompts), 1)
+
+    def test_restart_retypes_an_entry_its_session_never_received(self):
+        # Live 2026-10-15: the entry was typed before Claude took input, so
+        # the session never wrote a transcript; restart, on the user's word, types the same entry again.
+        self.ops.issue(1)
+        self.ops.drop_prompts = 1
+        failed = start.start_issues(self.repo, [1], ops=self.ops)[0]
+        self.assertEqual(failed["state"], "start_failed")
+        self.assertIn("not confirmed", failed["reason"])
+        start.start_issues(self.repo, [1], ops=self.ops)
+        self.assertEqual(len(self.ops.prompts), 1)  # never resent on its own (KTD7)
+        worker = start.restart("1", ops=self.ops)
+        self.assertEqual(worker["state"], "running")
+        self.assertEqual(worker["phase"], "mode_checked")
+        self.assertEqual(worker["action_id"], failed["action_id"])
+        self.assertEqual([prompt[3] for prompt in self.ops.prompts], ["/ce-work #1", "/ce-work #1"])
+        action = registry.load()["actions"][worker["action_id"]]
+        self.assertEqual((action["status"], action["resends"]), ("delivered", 1))
+        self.assertEqual(len(self.ops.worktrees), 1)
+        self.assertEqual(len(self.ops.agents), 1)
+        self.assertEqual(sum(event["kind"] == "entry_resent" for event in registry.read_events(0)), 1)
+
+    def test_restart_refuses_a_failed_start_unless_its_entry_provably_never_arrived(self):
+        def received(doc, worker):  # the session wrote a transcript, so the entry may still run
+            self.ops.write_transcript(worker["agent_name"], "/ce-work #1")
+        cases = (
+            ("transcript exists", received),
+            ("no session", lambda doc, worker: worker.pop("session_id")),
+            ("recovery pending", lambda doc, worker: worker.update(entry_recovery_pending=True)),
+            ("entry delivered", lambda doc, worker: doc["actions"][worker["action_id"]].update(status="delivered")),
+            ("not an entry", lambda doc, worker: doc["actions"][worker["action_id"]].update(kind="nudge")),
+            ("already retried", lambda doc, worker: doc["actions"][worker["action_id"]].update(resends=1)),
+            ("mode mismatch", lambda doc, worker: worker.update(phase="delivered")),
+            ("hold open", lambda doc, worker: doc["holds"].update(watcher_lost={"ts": 1})),
+            ("no slot", lambda doc, worker: doc["config"].update(cap=0)),
+        )
+        for index, (label, change) in enumerate(cases, 1):
+            with self.subTest(label), mock.patch.dict(os.environ, {"HERDR_COORD_HOME": str(self.root / f"refuse-{index}")}):
+                repo = self.root / f"repo-{index}"
+                repo.mkdir()
+                self.ops.issue(1)
+                self.ops.drop_prompts = 1
+                worker = start.start_issues(repo, [1], ops=self.ops)[0]
+                self.assertEqual(worker["state"], "start_failed", worker)
+                registry.update(lambda doc: change(doc, doc["workers"][worker["worker_id"]]))
+                prompts = len(self.ops.prompts)
+                with self.assertRaises(ValueError):
+                    start.restart("1", ops=self.ops)
+                self.assertEqual(len(self.ops.prompts), prompts)
+                self.assertEqual(self.workers()[0]["state"], "start_failed")
+
+    def test_restart_retype_that_fails_stays_unknown(self):
+        self.ops.issue(1)
+        self.ops.drop_prompts = 1
+        start.start_issues(self.repo, [1], ops=self.ops)
+        self.ops.prompt_error = "agent_not_found"
+        worker = start.restart("1", ops=self.ops)
+        self.assertEqual(worker["state"], "start_failed")
+        self.assertIn("agent_not_found", worker["reason"])
+        self.assertEqual(registry.load()["actions"][worker["action_id"]]["status"], "delivery_unknown")
+        # The failed retry may still arrive, so it is never typed a third time.
+        with self.assertRaisesRegex(ValueError, "never reached its session"):
+            start.restart("1", ops=self.ops)
+        self.assertEqual(len(self.ops.prompts), 2)
 
     def test_send_error_is_unknown_and_batch_continues(self):
         self.ops.issue(1)

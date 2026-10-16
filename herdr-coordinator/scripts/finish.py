@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import stat
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -314,6 +316,90 @@ def _finish_unregistered(worker, ops):
     return {"cleaned": True, "reason": "worktree was already removed; branch retained"}
 
 
+# Directory reparse points git may delete through: junctions and mount points, and symlinks.
+# The IO_REPARSE_TAG_* names exist in `stat` only on Windows.
+_LINK_TAGS = frozenset({getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003),
+                        getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C)})
+LINK_SCAN_SECONDS = 300
+
+
+def _directory_reparse(info) -> str | None:
+    """'link' for a directory junction or symlink (even a broken one), 'other' for any other
+    directory reparse point, None for an ordinary entry. `info` is an lstat result."""
+    attributes = getattr(info, "st_file_attributes", 0)
+    if not attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return "link" if stat.S_ISLNK(info.st_mode) else None
+    if not attributes & stat.FILE_ATTRIBUTE_DIRECTORY:
+        return None  # a file symlink: git removes the link itself
+    return "link" if getattr(info, "st_reparse_tag", 0) in _LINK_TAGS else "other"
+
+
+def _unlink_directory_links(worker, ops):
+    """Unlink every directory junction or symlink inside a worktree, never following one.
+
+    Git for Windows before 2.54 (2.50.1 here, reproduced) deletes through a junction in
+    `git worktree remove`: a live run (2026-10-15) linked the main checkout's node_modules into
+    its worktree, and removing the worktree emptied the main checkout's. Removing a link itself
+    (os.rmdir) never touches its target. Returns (refusal reason or None, links unlinked).
+    """
+    tree = worker["worktree_path"]
+    try:
+        if _directory_reparse(os.lstat(tree)):
+            return f"the worktree path {tree} is itself a link; the worktree was not removed", []
+    except FileNotFoundError:
+        return None, []
+    except OSError as exc:
+        return f"cannot check {tree} for linked folders: {exc}; the worktree was not removed", []
+    deadline = time.monotonic() + LINK_SCAN_SECONDS
+    links, folders = [], [tree]
+    while folders:
+        folder = folders.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if time.monotonic() > deadline:
+                        return (f"checking {tree} for linked folders took over {LINK_SCAN_SECONDS} s; "
+                                "the worktree was not removed"), []
+                    kind = _directory_reparse(entry.stat(follow_symlinks=False))
+                    if kind == "other":
+                        return (f"{entry.path} is a reparse point cleanup does not know; "
+                                "the worktree was not removed"), []
+                    if kind == "link":
+                        links.append(entry.path)
+                    elif entry.is_dir(follow_symlinks=False):
+                        folders.append(entry.path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"cannot check {folder} for linked folders: {exc}; the worktree was not removed", []
+    if not links:
+        return None, []
+    # git refuses to remove a dirty tree; do not take links out of a tree that stays.
+    try:
+        status = ops.git("status", "--porcelain", cwd=tree, timeout=COMMAND_TIMEOUT)
+    except (OSError, TimeoutError) as exc:
+        return f"cannot confirm the worktree is clean: {exc}; the worktree was not removed", []
+    if not status.ok:
+        return f"cannot confirm the worktree is clean: {_reason(status)}; the worktree was not removed", []
+    if status.stdout.strip():
+        return "worktree has uncommitted changes; the worktree was not removed", []
+    unlinked = []
+    for link in links:
+        try:
+            # Either removes the link, not the folder it points to; POSIX symlinks need unlink.
+            (os.rmdir if os.name == "nt" else os.unlink)(link)
+        except OSError as exc:
+            return f"cannot unlink the linked folder {link}: {exc}; the worktree was not removed", unlinked
+        if os.path.lexists(link):
+            return f"the linked folder {link} is still there; the worktree was not removed", unlinked
+        unlinked.append(link)
+    return None, unlinked
+
+
+def _unlinked_note(unlinked):
+    return f" (these linked folders were already unlinked: {', '.join(unlinked)})" if unlinked else ""
+
+
 def cleanup(worker: dict, *, ops) -> dict:
     """Close and remove an eligible checkout without force or branch deletion."""
     if merged_pr_applies(worker):
@@ -331,6 +417,7 @@ def cleanup(worker: dict, *, ops) -> dict:
             return {"cleaned": False, "reason": "worker PR is not merged"}
     if not worker.get("agent_name") or not worker.get("repo_path") or not worker.get("worktree_path"):
         return {"cleaned": False, "reason": "worker lacks agent, repository, or worktree identity"}
+    unlinked = []
     try:
         agent = ops.herdr("agent", "get", worker["agent_name"], timeout=COMMAND_TIMEOUT)
         if agent.ok:
@@ -345,12 +432,22 @@ def cleanup(worker: dict, *, ops) -> dict:
             closed = ops.herdr("workspace", "close", workspace, timeout=COMMAND_TIMEOUT)
             if not closed.ok and not _missing(closed, "workspace"):
                 return {"cleaned": False, "reason": _reason(closed)}
+        # After the close, so no agent is left to recreate a link; before any removal.
+        refusal, unlinked = _unlink_directory_links(worker, ops)
+        if refusal:
+            return {"cleaned": False, "reason": refusal + _unlinked_note(unlinked)}
+        removed = None
         if workspace and closed.ok:
             removed = ops.herdr("worktree", "remove", "--workspace", workspace, timeout=COMMAND_TIMEOUT)
-        else:
+        # Live herdr (2026-10-15) drops the closed workspace, so removing by it fails with
+        # workspace_not_found; the checkout is then removed through git, as on a later pass.
+        if removed is None or _missing(removed, "workspace"):
             removed = ops.git("worktree", "remove", worker["worktree_path"], cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
         if removed.ok:
             return {"cleaned": True, "reason": "workspace and worktree removed; branch retained"}
-        return _finish_unregistered(worker, ops) or {"cleaned": False, "reason": _reason(removed)}
+        result = _finish_unregistered(worker, ops) or {"cleaned": False, "reason": _reason(removed)}
+        if not result["cleaned"]:
+            result["reason"] += _unlinked_note(unlinked)
+        return result
     except (OSError, TimeoutError) as exc:
-        return {"cleaned": False, "reason": str(exc)}
+        return {"cleaned": False, "reason": str(exc) + _unlinked_note(unlinked)}

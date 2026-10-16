@@ -208,7 +208,8 @@ def _confirmed(action, records):
     if action.get("transport") != "form":
         for record in records[position:]:
             message = record.get("message", {})
-            if record.get("isSidechain") or message.get("role") != "user":
+            # A compaction summary can quote an earlier relay; it never delivers one.
+            if record.get("isSidechain") or record.get("isCompactSummary") or message.get("role") != "user":
                 continue
             content = message.get("content")
             if isinstance(content, str) and _prompt_matches(content, action["text"]):

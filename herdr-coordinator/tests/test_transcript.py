@@ -143,6 +143,35 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(self.assess(self.probe + noise).state, "turn_finished")
         self.assertEqual(self.assess(noise).state, "unknown")
 
+    def test_idle_compaction_does_not_reopen_an_ended_turn(self):
+        # Live 2026-10-15 (Claude Code 2.1.300): "Compacted while idle" wrote these
+        # two records after end_turn, and the summary read as an unanswered prompt, then stalled.
+        finished = self.probe[:self.final_index + 1]
+        boundary = {"type": "system", "subtype": "compact_boundary", "isSidechain": False,
+                    "content": "Conversation compacted", "isMeta": False}
+        summary = {"type": "user", "isSidechain": False, "isVisibleInTranscriptOnly": True,
+                   "isCompactSummary": True, "message": {"role": "user", "content": (
+                       "This session is being continued from a previous conversation that ran out "
+                       "of context.\n\n<command-name>/compound-engineering:ce-explain</command-name>"
+                       "\n<command-args></command-args>")}}
+        compacted = finished + [boundary, summary]
+        for status, age in (("idle", 7200), ("done", 7200), ("idle", 0)):
+            with self.subTest(status=status, age=age):
+                self.assertEqual(self.assess(compacted, status=status, age=age).state, "turn_finished")
+        self.assertEqual(self.assess(finished + [boundary, dict(summary, isCompactSummary=False)],
+                                     status="idle", age=7200).state, "stalled")
+        # The summary quotes the entry command, but it never delivers one.
+        self.assertFalse(transcript.delivered([summary], after_index=-1,
+                                              command_name="compound-engineering:ce-explain", command_args=""))
+        self.assertTrue(transcript.delivered([dict(summary, isCompactSummary=False)], after_index=-1,
+                                             command_name="compound-engineering:ce-explain", command_args=""))
+        later_prompt = self.probe[self.final_prompt_index]
+        self.assertEqual(self.assess(compacted + [later_prompt]).state, "running")
+        # An untaken background notice before the compaction is still dropped.
+        notice = background_notification("toolu_untaken")
+        self.assertEqual(self.assess(finished + [notice, boundary, summary], status="idle", age=7200).state,
+                         "turn_finished")
+
     def test_later_prompt_supersedes_an_ended_turn(self):
         finished = self.probe[:self.final_index + 1]
         later_prompt = self.probe[self.final_prompt_index]

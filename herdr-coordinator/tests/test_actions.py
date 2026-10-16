@@ -359,6 +359,13 @@ class ActionTests(unittest.TestCase):
                 self.assertEqual(len(self.ops.sends), 2)
         self.assertFalse(any(e["kind"] == "delivery_failed" for e in registry.read_events(0)))
 
+    def test_a_compaction_summary_never_confirms_a_send(self):
+        action = {"transcript_position": 0, "text": "Yes on all of those"}
+        summary = {"type": "user", "isSidechain": False, "isCompactSummary": True,
+                   "message": {"role": "user", "content": "Yes on all of those"}}
+        self.assertFalse(actions._confirmed(action, [summary]))
+        self.assertTrue(actions._confirmed(action, [dict(summary, isCompactSummary=False)]))
+
     def test_relay_confirms_a_delivered_unknown_action_instead_of_refusing(self):
         # Live: norm-308's relay arrived but stayed delivery_unknown, so every later relay was
         # refused until the watcher reconciled it.

@@ -338,11 +338,51 @@ def _send_entry(worker, ops):
     if not prepared:
         return worker
     registry.append_event("entry_action_recorded", action)
+    _prompt_entry(worker, action, ops)
+    return _record(worker["worker_id"], "worker_phase", phase="command_sent")
+
+
+def _prompt_entry(worker, action, ops):
     _call(
         ops.herdr, "agent", "prompt", worker["agent_name"],
         f"/{worker['entry_command']} {action['command_args']}", timeout=COMMAND_TIMEOUT,
     )
-    return _record(worker["worker_id"], "worker_phase", phase="command_sent")
+
+
+def _entry_unreceived(worker) -> bool:
+    """True only while the agent's session has no transcript at all.
+
+    Claude Code creates the transcript with the first prompt it takes, so a missing file means the
+    entry keystrokes were dropped (live 2026-10-15: typed about 0.6 s after
+    `agent start` reported ready, on a loaded box). KTD7 still never resends on its own; only an
+    explicit `restart` types it again, and it cannot run twice.
+    """
+    return (bool(worker.get("session_id"))
+            and transcript.find_transcript(worker["session_id"], PROJECTS_ROOT) is None)
+
+
+def _resend_entry(worker, ops):
+    """Type the recorded entry once more; its action and delivery proof stay the same."""
+    counted = False
+
+    def count(doc):
+        nonlocal counted
+        current = doc["workers"][worker["worker_id"]]
+        action = doc["actions"].get(current.get("action_id"), {})
+        if not _can_start(current) or action.get("kind") != "entry" or action.get("status") != "delivery_unknown":
+            return
+        action["resends"] = action.get("resends", 0) + 1
+        counted = True
+
+    doc = registry.update(count)
+    worker = doc["workers"][worker["worker_id"]]
+    if not counted:
+        return worker
+    action = doc["actions"][worker["action_id"]]
+    registry.append_event("entry_resent", {"worker_id": worker["worker_id"], "action_id": action["id"],
+                                           "resends": action["resends"]})
+    _prompt_entry(worker, action, ops)
+    return worker
 
 
 def _confirm_delivery(worker, ops):
@@ -412,8 +452,10 @@ def _check_mode(worker, ops):
     )
 
 
-def _run_worker(worker, ops, *, keepalive=None):
+def _run_worker(worker, ops, *, keepalive=None, resend_entry=False):
     try:
+        if resend_entry:
+            worker = _resend_entry(worker, ops)
         for phases, operation in (
             ({None}, _create_worktree),
             ({"worktree"}, _start_agent),
@@ -508,9 +550,10 @@ def start_next_queued(*, ops=adapters, keepalive=None) -> dict | None:
 
 
 def restart(name, *, ops=adapters) -> dict:
-    """Explicitly claim an interrupted start and reuse its completed phases."""
+    """Explicitly claim an interrupted start, or a failed one whose entry never arrived, and reuse its completed phases."""
     owner = _start_owner()
     admitted = []
+    resend = []
 
     def claim(doc):
         matches = [worker for worker in doc["workers"].values()
@@ -521,8 +564,11 @@ def restart(name, *, ops=adapters) -> dict:
         worker = matches[0]
         if doc["holds"]:
             raise ValueError("cannot restart while a hold is open; run go first")
-        if worker.get("state") != "start_interrupted":
-            raise ValueError("restart requires a start_interrupted worker")
+        if worker.get("state") == "start_failed" and _entry_retryable(doc, worker):
+            resend.append(True)
+        elif worker.get("state") != "start_interrupted":
+            raise ValueError("restart requires a start_interrupted worker, or a start_failed one "
+                             "whose entry never reached its session")
         if not _has_slot(doc):
             raise ValueError("no slot available for restart")
         worker.update(state="starting", start_owner=owner)
@@ -532,4 +578,17 @@ def restart(name, *, ops=adapters) -> dict:
     registry.update(claim)
     worker = admitted[0]
     registry.append_event("worker_starting", worker)
+    if resend:
+        return _run_worker(worker, ops, resend_entry=True)
     return _run_worker(worker, ops)
+
+
+def _entry_retryable(doc, worker) -> bool:
+    """A failed start whose recorded entry provably never reached its live session."""
+    action = doc["actions"].get(worker.get("action_id"), {})
+    # One retry per start: a retry whose send timed out may still arrive, so it is never repeated.
+    return (action.get("kind") == "entry" and action.get("status") == "delivery_unknown"
+            and not action.get("resends")
+            and worker.get("phase") in {"agent_started", "command_sent"}
+            and bool(worker.get("agent_name")) and not worker.get("entry_recovery_pending")
+            and _entry_unreceived(worker))

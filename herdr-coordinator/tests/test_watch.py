@@ -1278,6 +1278,9 @@ class WatchTests(unittest.TestCase):
                 self.assertEqual(state, expected)
         self.assertTrue(watch._answered_prompt([queued, END]))
         self.assertFalse(watch._answered_prompt([declined[2], END]))
+        # A compaction summary is nobody's prompt, so it never reopens a settled worker.
+        self.assertTrue(watch._answered_prompt([PROMPT, END]))
+        self.assertFalse(watch._answered_prompt([dict(PROMPT, isCompactSummary=True), END]))
         # Verification after an interrupt never sees an earlier turn's final message.
         seen = []
         self.ops.verify_done = lambda worker, **kwargs: (seen.append(kwargs["records"]), dict(self.ops.verdict))[1]
