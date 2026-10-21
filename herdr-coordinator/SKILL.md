@@ -30,7 +30,7 @@ Inside one repository, the user may run more than one coordinator, usually as ta
 - A lane whose coordinator is gone but that still has unanswered questions, unacknowledged events, running workers, or queued issues blocks every new tab from starting a different lane. The refusal names it and its work. On the user's word, drain it: `lane bind <that lane>`, handle or `handoff` its workers, acknowledge its events, then `lane bind` your own lane.
 
 What lanes change:
-- Workers belong to the lane that started them, and their workspaces are named for it ("my-app seo #12"; main's stay "my-app #12").
+- Workers belong to the lane that started them. Their workspaces, nested under the repository in herdr's sidebar, are labelled `<tag> #<issue> <short title>`, for example "C3 #2502 faster issue filing". The tag is the leading C-number of the tab that started the worker ("C3-data quality" gives C3); a tab without one uses its lane name, and `main` uses the repository name. So the user names coordinator tabs C1, C2, C3... to tell owners apart at a glance. The label is display only: a worker's lane lives in the registry, and a `handoff` relabels it with the receiving lane's tag.
 - `follow`, `event` and `ack` show only your lane's events, plus repository-wide ones (watcher, herdr, holds, and alerts about other lanes).
 - `relay`, `nudge`, `resume`, `restart` and `cleanup` act only on your lane's workers, and refuse another lane's worker, naming its lane.
 - `status` shows every worker with its lane, and every lane with whether a `follow` is running and how many events are unhandled.

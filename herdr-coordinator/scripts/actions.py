@@ -838,8 +838,10 @@ def handoff(name, target, *, lane="main", ops=adapters):
     claimed = []
     warnings = []
     target_details = {}
+    target_tag = None
 
     def claim_handoff(doc):
+        nonlocal target_tag
         current = worker_named(name, doc)
         lanes.check_worker_lane(current, lane, error=ActionError)
         if target not in doc["lanes"]:
@@ -847,6 +849,7 @@ def handoff(name, target, *, lane="main", ops=adapters):
         if target == lane:
             raise ActionError(f"Worker is already in the same lane: {lane}")
         _handoff_ready(doc, current)
+        owner = None
         if snapshot is not None:
             owner = next((binding for binding in doc["tab_bindings"].values()
                           if binding["lane"] == target and lanes.owner_live(binding["controller"], snapshot)), None)
@@ -857,6 +860,8 @@ def handoff(name, target, *, lane="main", ops=adapters):
                 current_name = lanes.contact_stale(owner, session_names)
                 if current_name is not None:
                     target_details["target_contact_stale"] = current_name
+        target_tag = lanes.coordinator_tag(owner.get("label_seen") if owner else None,
+                                           target, current["repo_path"])
         current["handoff_claim"] = claim
         claimed.append(dict(current))
 
@@ -879,6 +884,7 @@ def handoff(name, target, *, lane="main", ops=adapters):
             raise ActionError(f"Unknown lane: {target}")
         _handoff_ready(doc, current)
         current["lane"] = target
+        current["label_tag"] = target_tag
         current.pop("handoff_claim")
         events.append(("worker_handoff", {**current, "from_lane": lane, "to_lane": target}))
 
@@ -890,8 +896,11 @@ def handoff(name, target, *, lane="main", ops=adapters):
         if not isinstance(workspace_id, str) or not workspace_id.strip():
             raise ActionError("herdr returned no current workspace id to rename")
         worker = refresh_session(worker, agent)
-        source_label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"])
-        target_label = lanes.workspace_label(worker["repo_path"], target, worker["issue"])
+        # Recomputed, so a worker labelled before short labels is restored in the new style.
+        source_label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"],
+                                             worker.get("title", ""), tag=worker.get("label_tag"))
+        target_label = lanes.workspace_label(worker["repo_path"], target, worker["issue"],
+                                             worker.get("title", ""), tag=target_tag)
         workspace = lanes._workspace(ops, workspace_id)
         # A failed rename reply can still mean herdr applied it. An already-renamed workspace
         # from an earlier crash also needs restoring if this attempt cannot commit.

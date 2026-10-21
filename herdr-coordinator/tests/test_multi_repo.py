@@ -166,7 +166,7 @@ class MultiRepoTests(RepoFixture):
         with mock.patch.object(adapters, "herdr", side_effect=ops.herdr):
             code, output = self.cli("handoff", "worker", "seo", repo=self.a)
         self.assertEqual(code, 0, output)
-        self.assertEqual(ops.renames, [("workspace", "rename", workspace_id, "A seo #7")])
+        self.assertEqual(ops.renames, [("workspace", "rename", workspace_id, "seo #7")])
         self.assertEqual(self.load(self.b), b_before)
         contexts = {lane: {"lane": lane, "tab_id": f"w1:{lane}", "pane_id": f"w1:{lane}:p1",
                            "workspace_id": "w1", "controller": {
@@ -228,7 +228,7 @@ class MultiRepoTests(RepoFixture):
         with mock.patch.object(start, "start_issues", return_value=[]) as run:
             code, output = self.cli("start", str(worktree), "12", repo=self.a)
         self.assertEqual(code, 0, output)
-        run.assert_called_once_with(str(self.a), [12], lane="main")
+        run.assert_called_once_with(str(self.a), [12], lane="main", tag=None)
 
     def test_outside_repository_refuses_and_names_repo_option(self):
         result = self.cli_process("status")
@@ -289,7 +289,7 @@ class MultiRepoTests(RepoFixture):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(herdr_coord.main(["start", str(self.a), "12", "--repo", str(self.b)]), 0)
             self.assertEqual(os.environ["HERDR_COORD_HOME"], str(home))
-            run.assert_called_once_with(str(self.a), [12], lane="main")
+        run.assert_called_once_with(str(self.a), [12], lane="main", tag=None)
 
     def test_config_set_and_show_are_repository_local(self):
         b_before = self.load(self.b)

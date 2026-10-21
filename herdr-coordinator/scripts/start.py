@@ -238,7 +238,8 @@ def _refuse_open_workspace(path, target, ops):
 def _create_worktree(worker, ops):
     worker_id = worker["worker_id"]
     lane = worker.get("lane", "main")
-    label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"])
+    label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"],
+                                  worker.get("title", ""), tag=worker.get("label_tag"))
     path = worker["worktree_path"]
     target = os.path.normcase(os.path.realpath(path))
     if not worker.get("worktree_created") and Path(path).exists():
@@ -522,12 +523,13 @@ def _run_worker(worker, ops, *, keepalive=None, resend_entry=False):
         )
 
 
-def start_issues(repo_path, issues, *, lane="main", ops=adapters) -> list[dict]:
+def start_issues(repo_path, issues, *, lane="main", tag=None, ops=adapters) -> list[dict]:
     repo = str(Path(repo_path).resolve())
+    tag = lanes.coordinator_tag(tag, lane, repo)
     summaries = []
     for position, issue in enumerate(issues):
         try:
-            _start_issue(repo, issue, summaries, ops, lane=lane)
+            _start_issue(repo, issue, summaries, ops, lane=lane, tag=tag)
         except Exception as exc:
             # Earlier issues may have started: the caller reports what the registry holds for each,
             # never a blanket failure.
@@ -552,7 +554,7 @@ def _interrupted_summary(repo, issue, exc):
     return summary
 
 
-def _start_issue(repo, issue, summaries, ops, *, lane="main"):
+def _start_issue(repo, issue, summaries, ops, *, lane="main", tag=None):
     try:
         number = int(str(issue).lstrip("#"))
         if number <= 0:
@@ -577,7 +579,7 @@ def _start_issue(repo, issue, summaries, ops, *, lane="main"):
         command, args = entry or ("", "")
         candidate = {
             "worker_id": worker_id, "issue": number, "repo_path": repo, "lane": lane,
-            "title": data.get("title", ""), "entry_command": command,
+            "title": data.get("title", ""), "label_tag": tag, "entry_command": command,
             "entry_args": args or f"#{number}", "phase": None,
             "branch": f"issue/{number}",
             "worktree_path": str(Path(repo).with_name(f"{Path(repo).name}-wt-issue-{number}")),

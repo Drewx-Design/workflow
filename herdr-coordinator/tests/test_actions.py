@@ -355,7 +355,7 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(worker["workspace_id"], self.workspace_id)
         self.assertEqual(worker["pane_id"], AGENTS["idle"]["pane_id"])
         self.assertNotIn("handoff_claim", worker)
-        self.assertEqual(self.ops.renames, [("workspace", "rename", self.workspace_id, "boon-town seo #7")])
+        self.assertEqual(self.ops.renames, [("workspace", "rename", self.workspace_id, "seo #7")])
         self.assertEqual(result["to_lane"], "seo")
         events = [e for e in registry.read_events(0, lane=None) if e["kind"] == "worker_handoff"]
         self.assertEqual(len(events), 1)
@@ -367,6 +367,59 @@ class ActionTests(unittest.TestCase):
         self.assertNotIn(events[0], registry.read_events(0, lane="app"))
         actions.handoff("worker", "main", lane="seo", ops=self.ops)
         self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town #7")
+
+    def test_handoff_uses_the_live_target_tag_and_stores_it_on_commit(self):
+        binding = {"lane": "seo", "label_seen": "c12:issues", "source": "tab label", "explicit": False,
+                   "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                   "pane_id": "target-pane"}
+        for snapshot, bindings, tag in (
+            ({"tab_ids": {"target-tab"}, "controller_counts": {"target-session": 1}},
+             {"target-tab": binding}, "C12"),
+            ({"tab_ids": set(), "controller_counts": {}}, {"target-tab": binding}, "seo"),
+            ({"tab_ids": set(), "controller_counts": {}}, {}, "seo"),
+            (None, {"target-tab": binding}, "seo"),
+        ):
+            with self.subTest(snapshot=snapshot, bindings=bindings):
+                self.prepare_handoff(lane="main", label_tag="C3", title="fix: faster issue filing")
+                registry.update(lambda doc: (doc["tab_bindings"].clear(), doc["tab_bindings"].update(bindings)))
+                self.ops.workspace_labels[self.workspace_id] = "C3 #7 faster issue filing"
+                with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot):
+                    result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                expected = f"{tag} #7 faster issue filing"
+                self.assertEqual(result["workspace_label"], expected)
+                self.assertEqual(self.ops.workspace_labels[self.workspace_id], expected)
+                self.assertEqual(actions.worker_named("worker")["label_tag"], tag)
+                event = [e for e in registry.read_events(0, lane="seo") if e["kind"] == "worker_handoff"][-1]
+                self.assertEqual(event["payload"]["label_tag"], tag)
+
+    def test_handoff_failure_restores_the_stored_source_tag_and_title(self):
+        self.prepare_handoff(lane="main", label_tag="C3", title="feat(scope): faster issue filing")
+        binding = {"lane": "seo", "label_seen": "C12-issues", "source": "tab label", "explicit": False,
+                   "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                   "pane_id": "target-pane"}
+        registry.update(lambda doc: doc["tab_bindings"].update({"target-tab": binding}))
+        source_label = "C3 #7 faster issue filing"
+        target_label = "C12 #7 faster issue filing"
+        self.ops.workspace_labels[self.workspace_id] = source_label
+        original = self.ops.herdr
+
+        def rename(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("workspace", "rename") and args[3] == target_label:
+                self.set_state("running", relay_request={"text": "late relay"})
+            return result
+
+        snapshot = {"tab_ids": {"target-tab"}, "controller_counts": {"target-session": 1}}
+        with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot), \
+                mock.patch.object(self.ops, "herdr", side_effect=rename):
+            with self.assertRaisesRegex(actions.ActionError, "relay"):
+                actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertEqual(self.ops.renames, [("workspace", "rename", self.workspace_id, target_label),
+                                           ("workspace", "rename", self.workspace_id, source_label)])
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], source_label)
+        self.assertEqual(actions.worker_named("worker")["label_tag"], "C3")
+        self.assertEqual(actions.worker_named("worker")["lane"], "main")
+        self.assertNotIn("handoff_claim", actions.worker_named("worker"))
 
     def test_handoff_warns_only_when_target_has_no_live_owner(self):
         controller = {"agent": "claude", "kind": "id", "value": "target-session"}
@@ -577,7 +630,7 @@ class ActionTests(unittest.TestCase):
         worker = actions.worker_named("worker")
         self.assertEqual(worker["lane"], "main")
         self.assertEqual(worker["handoff_claim"]["owner"], dead_owner)
-        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town seo #7")
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "seo #7")
         actions.handoff("worker", "seo", lane="main", ops=self.ops)
         self.assertEqual(len(self.ops.renames), 1)
         self.assertEqual(actions.worker_named("worker")["lane"], "seo")
@@ -617,7 +670,7 @@ class ActionTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(actions.worker_named("worker")["lane"], "seo")
-        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town seo #7")
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "seo #7")
         self.assertEqual(len(self.ops.renames), 1)
 
     def test_handoff_commit_rechecks_guards_and_rolls_label_back(self):
@@ -637,7 +690,7 @@ class ActionTests(unittest.TestCase):
 
                 def rename(*args, **kwargs):
                     result = original(*args, **kwargs)
-                    if args[:2] == ("workspace", "rename") and args[3] == "boon-town seo #7":
+                    if args[:2] == ("workspace", "rename") and args[3] == "seo #7":
                         registry.update(lambda doc: doc["workers"]["worker"].update(changes))
                     return result
 
@@ -654,7 +707,7 @@ class ActionTests(unittest.TestCase):
 
         def rename(*args, **kwargs):
             result = original(*args, **kwargs)
-            if args[:2] == ("workspace", "rename") and args[3] == "boon-town seo #7":
+            if args[:2] == ("workspace", "rename") and args[3] == "seo #7":
                 self.set_state("running", relay_request={"text": "late relay"})
             return result
 
@@ -663,14 +716,14 @@ class ActionTests(unittest.TestCase):
         with mock.patch.object(self.ops, "herdr", side_effect=rename):
             with self.assertRaises(actions.ActionError) as refused:
                 actions.handoff("worker", "seo", lane="main", ops=self.ops)
-        for text in ("relay", "boon-town #7", "boon-town seo #7", "workspace busy"):
+        for text in ("relay", "boon-town #7", "seo #7", "workspace busy"):
             self.assertIn(text, str(refused.exception))
         self.assertEqual(actions.worker_named("worker")["lane"], "main")
         self.assertNotIn("handoff_claim", actions.worker_named("worker"))
 
     def test_handoff_rename_failure_leaves_source_lane_and_names_reason(self):
         self.prepare_handoff()
-        self.ops.rename_results["boon-town seo #7"] = adapters.CommandResult(
+        self.ops.rename_results["seo #7"] = adapters.CommandResult(
             False, 1, "", "", error_code="rename_failed", error_message="workspace busy")
         with self.assertRaisesRegex(actions.ActionError, "workspace busy"):
             actions.handoff("worker", "seo", lane="main", ops=self.ops)
@@ -685,7 +738,7 @@ class ActionTests(unittest.TestCase):
 
         def rename(*args, **kwargs):
             result = original(*args, **kwargs)
-            if args[:2] == ("workspace", "rename") and args[3] == "boon-town seo #7":
+            if args[:2] == ("workspace", "rename") and args[3] == "seo #7":
                 raise actions.ActionError("rename reply lost after applying")
             return result
 

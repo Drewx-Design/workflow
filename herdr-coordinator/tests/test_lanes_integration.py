@@ -343,7 +343,7 @@ class LanesIntegrationTests(unittest.TestCase):
         for issue, (lane, caller) in enumerate(callers.items(), 201):
             result = json.loads(self.cli("start", self.repo, issue, caller=caller))
             self.assertEqual(result["state"], "running", result)
-            label = "boon-town" + (" " + lane if lane != "main" else "") + f" #{issue}"
+            label = ("boon-town" if lane == "main" else lane) + f" #{issue} Issue {issue}"
             self.assertEqual(json.loads((self.root / f"label-workspace-{issue}.json").read_text(encoding="utf-8")),
                              label)
         workers = {worker["lane"]: worker for worker in registry.load()["workers"].values()}
@@ -564,7 +564,7 @@ class LanesIntegrationTests(unittest.TestCase):
         self.assertEqual(handoff["payload"]["state_token"], "handoff-token")
         self.assertEqual(next(event for event in events if event["seq"] == before)["lanes"], ["main"])
         self.assertEqual(next(event for event in events if event["seq"] == after)["lanes"], ["seo"])
-        self.assertEqual(json.loads((self.root / "label-workspace-11.json").read_text(encoding="utf-8")), "boon-town seo #11")
+        self.assertEqual(json.loads((self.root / "label-workspace-11.json").read_text(encoding="utf-8")), "seo #11")
         refused = json.loads(self.cli("relay", "worker-11", "old owner", "--token", "handoff-token", lane="main", code=1))
         self.assertIn("lane seo", refused["detail"])
         reply = json.loads(self.cli("relay", "worker-11", "new owner", "--token", "handoff-token", lane="seo"))

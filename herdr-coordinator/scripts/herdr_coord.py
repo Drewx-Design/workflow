@@ -174,7 +174,8 @@ def main(argv=None):
                                   "reason": "no watcher is running and none could be launched"}))
             return 1
     try:
-        summaries = start.start_issues(args.repo, args.issues, lane=args.lane)
+        summaries = start.start_issues(args.repo, args.issues, lane=args.lane,
+                                       tag=args.lane_context.get("tab_label"))
     except Exception as exc:
         summaries = getattr(exc, "start_summaries", None) or [
             {"issue": issue, "state": "start_failed", "reason": str(exc)}

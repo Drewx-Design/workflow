@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import unicodedata
 
 import adapters
 import registry
@@ -14,9 +15,35 @@ import repo_root
 WORKSPACE_TIMEOUT = 5
 
 
-def workspace_label(repo_path, lane, issue):
-    """A worker's herdr workspace label; _derived_lane reads the lane back from it."""
-    return f"{repo_root.display_name(repo_path)}{' ' + lane if lane != 'main' else ''} #{issue}"
+def coordinator_tag(tab_label, lane, repo_path):
+    match = re.match(r"^C([0-9]+)(?=\Z|[ _:-])", tab_label or "", re.IGNORECASE)
+    if match:
+        return f"C{match[1]}"
+    return repo_root.display_name(repo_path) if lane == "main" else lane
+
+
+def short_title(title):
+    title = " ".join((title or "").split())
+    # Cf too: bidi overrides and zero-width characters would disguise the label in the sidebar.
+    title = "".join(char for char in title if unicodedata.category(char) not in {"Cc", "Cf"})
+    title = re.sub(
+        r"^(?:(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([^)]*\))?!?:|\[[^]]+\])\s*",
+        "", title, flags=re.IGNORECASE,
+    ).strip()
+    if len(title) > 32:
+        head = title[:33]
+        title = head.rpartition(" ")[0] or head[:32]  # one long word is cut, not dropped
+    while title and (title[-1].isspace() or unicodedata.category(title[-1]).startswith("P")):
+        title = title[:-1]
+    return title
+
+
+def workspace_label(repo_path, lane, issue, title="", *, tag=None):
+    """A display label; worker lane ownership comes from the registry."""
+    if tag is None:
+        tag = coordinator_tag(None, lane, repo_path)
+    label = f"{tag} #{issue} {short_title(title)}"
+    return "".join(char for char in label if unicodedata.category(char) not in {"Cc", "Cf"}).strip()
 
 
 def claim_owner_alive(owner):

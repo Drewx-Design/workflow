@@ -26,6 +26,52 @@ import watch
 FIXTURES = Path(__file__).with_name("fixtures")
 
 
+class WorkspaceLabelTests(unittest.TestCase):
+    def test_coordinator_tag_uses_only_a_leading_delimited_c_number(self):
+        for label, expected in (
+            ("C3-data quality", "C3"), ("c3 issues", "C3"), ("C12", "C12"),
+            ("c12:issues", "C12"), ("C3_issues", "C3"), ("C-issues", "seo"),
+            ("Colloborator", "seo"), ("C3issues", "seo"), (" C3 issues", "seo"),
+            ("C3\tissues", "seo"), ("C3\n", "seo"), (None, "seo"),
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(lanes.coordinator_tag(label, "seo", "boon-town"), expected)
+        self.assertEqual(lanes.coordinator_tag(None, "main", "boon-town"), "boon-town")
+        self.assertEqual(lanes.coordinator_tag("C-issues", "main", "boon-town"), "boon-town")
+        self.assertEqual(lanes.coordinator_tag("C12", "main", "boon-town"), "C12")
+
+    def test_short_title_collapses_whitespace_and_strips_prefixes_and_punctuation(self):
+        for title in ("fix: faster issue filing.", "feat(scope): faster issue filing!",
+                      "[tag] faster issue filing...", "fix!: faster issue filing\u2026",
+                      "  faster\tissue\nfiling  "):
+            with self.subTest(title=title):
+                self.assertEqual(lanes.short_title(title), "faster issue filing")
+
+    def test_short_title_cuts_at_a_word_boundary_within_32_characters(self):
+        self.assertEqual(lanes.short_title("faster issue filing with clearer coordinator labels"),
+                         "faster issue filing with clearer")
+        title = "a" * 32
+        self.assertEqual(lanes.short_title(title + " more"), title)
+        self.assertEqual(lanes.short_title("a" * 33), "a" * 32)  # one long word is cut, not dropped
+        self.assertEqual(lanes.short_title(None), "")
+        self.assertEqual(lanes.short_title("fix\u202e the \u200bgate"), "fix the gate")
+        self.assertEqual(lanes.workspace_label("C:/repos/boon-town", "seo", 7, "x\u2066y", tag="C3"), "C3 #7 xy")
+        self.assertEqual(lanes.workspace_label("C:/repos/boon-town", "seo", 7, "title", tag="\u2066"), "#7 title")
+
+    def test_empty_title_omits_the_title_and_trailing_space(self):
+        for title in ("", " \t\n ", "fix:"):
+            with self.subTest(title=title):
+                self.assertEqual(lanes.short_title(title), "")
+                self.assertEqual(lanes.workspace_label("boon-town", "seo", 12, title, tag="C3"),
+                                 "C3 #12")
+
+    def test_workspace_label_removes_tabs_and_control_characters(self):
+        self.assertEqual(lanes.workspace_label("boon-town", "seo", 12,
+                                               "fix: faster\tissue\nfiling\x01", tag="C3\t\x00\x7f\x85"),
+                         "C3 #12 faster issue filing")
+        self.assertEqual(lanes.workspace_label("boon-town", "seo", 12, "Issue 12"), "seo #12 Issue 12")
+
+
 class FakeOps:
     def __init__(self):
         self.workspace = json.loads((FIXTURES / "herdr-workspace-get-main.json").read_text(encoding="utf-8"))
@@ -745,6 +791,11 @@ class LaneTests(unittest.TestCase):
             }):
                 self.ops.caller("w1", label)
                 self.assertEqual(self.resolve(), expected)
+
+    def test_short_worker_labels_without_a_repository_prefix_derive_main(self):
+        for label in ("C3 #12 faster issue filing", "seo #12 faster issue filing"):
+            with self.subTest(label=label):
+                self.assertEqual(lanes._derived_lane("boon-town", {"label": label}), "main")
 
     def test_worker_fixture_uses_workspace_label(self):
         self.ops.workspace = json.loads((FIXTURES / "herdr-workspace-get-worker.json").read_text(encoding="utf-8"))
@@ -1476,7 +1527,7 @@ class LaneTests(unittest.TestCase):
         with mock.patch.object(herdr_coord, "_ensure_watcher", return_value=None), \
                 mock.patch.object(start, "start_issues", return_value=[]) as run:
             self.assertEqual(self.cli("start", "boon-town", "12")[0], 0)
-        run.assert_called_once_with("boon-town", [12], lane="seo")
+        run.assert_called_once_with("boon-town", [12], lane="seo", tag="1")
         with mock.patch.object(watch, "follow", return_value=0) as follow:
             self.assertEqual(self.cli("follow")[0], 0)
         follow.assert_called_once_with(interval=5, lane="seo", context={

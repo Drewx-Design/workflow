@@ -262,7 +262,7 @@ class StartTests(unittest.TestCase):
             ("git", ("status", "--porcelain")),
             ("herdr", ("workspace", "list")),
             ("herdr", ("workspace", "create", "--cwd", str(path),
-                       "--label", "repo with spaces #1930", "--no-focus")),
+                       "--label", "repo with spaces #1930 Issue 1930", "--no-focus")),
         ])
         self.assertEqual(self.ops.calls[0][2]["cwd"], str(self.repo))
         self.assertEqual(self.ops.calls[1][2]["cwd"], str(path))
@@ -471,7 +471,7 @@ class StartTests(unittest.TestCase):
     def test_cli_start_and_restart_pass_the_resolved_lane(self):
         context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1", "workspace_id": "w1",
                    "controller": {"agent": "claude", "kind": "id", "value": "coordinator-session"},
-                   "source": "tab label"}
+                   "source": "tab label", "tab_label": "C3-data quality"}
         for command, argv, expected in (
             ("start_issues", ["start", str(self.repo), "12"], (str(self.repo), [12])),
             ("restart", ["restart", "#12"], ("#12",)),
@@ -481,29 +481,70 @@ class StartTests(unittest.TestCase):
                     mock.patch.object(start, command, return_value=[] if command == "start_issues" else {}) as run, \
                     mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(herdr_coord.main(argv), 0)
-            run.assert_called_once_with(*expected, lane="seo")
+            run.assert_called_once_with(*expected, lane="seo",
+                                        **({"tag": "C3-data quality"} if command == "start_issues" else {}))
 
     def test_start_stores_lane_and_labels_both_workspace_creation_paths(self):
-        for index, (lane, fallback) in enumerate((("seo", False), ("main", False),
-                                                 ("seo", True), ("main", True))):
-            with self.subTest(lane=lane, fallback=fallback), mock.patch.dict(os.environ, {
+        for index, (lane, fallback, tab_label) in enumerate((
+            ("seo", False, None), ("main", False, None), ("seo", True, None), ("main", True, None),
+            ("seo", False, "C3-data quality"), ("seo", True, "C3-data quality"),
+        )):
+            with self.subTest(lane=lane, fallback=fallback, tab_label=tab_label), mock.patch.dict(os.environ, {
                     "HERDR_COORD_HOME": str(self.root / f"labels-{index}")}):
                 repo = self.root / str(index) / "boon-town"
                 repo.mkdir(parents=True)
                 self.ops.issue(12)
                 self.ops.worktree_error = "unknown_command" if fallback else None
-                worker = start.start_issues(repo, [12], lane=lane, ops=self.ops)[0]
+                worker = start.start_issues(repo, [12], lane=lane, tag=tab_label, ops=self.ops)[0]
                 self.assertEqual(worker["state"], "running", worker)
                 self.assertEqual(worker["lane"], lane)
                 self.assertEqual(self.workers()[0]["lane"], lane)
                 command = ("workspace", "create") if fallback else ("worktree", "create")
                 workspace = next(args for kind, args, _ in reversed(self.ops.calls)
                                  if kind == "herdr" and args[:2] == command)
-                self.assertEqual(workspace[workspace.index("--label") + 1],
-                                 "boon-town #12" if lane == "main" else "boon-town seo #12")
+                tag = "C3" if tab_label else ("boon-town" if lane == "main" else "seo")
+                self.assertEqual(workspace[workspace.index("--label") + 1], f"{tag} #12 Issue 12")
+                self.assertEqual(worker["label_tag"], tag)
                 events = registry.read_events(0, lane=None)
                 self.assertEqual(events[0]["kind"], "worker_starting")
                 self.assertTrue(all(event["lanes"] == [lane] for event in events))
+
+    def test_start_and_restart_reuse_the_coordinator_tag_and_stored_title(self):
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback), mock.patch.dict(os.environ, {
+                    "HERDR_COORD_HOME": str(self.root / f"tag-{fallback}")}):
+                repo = self.root / str(fallback) / "boon-town"
+                repo.mkdir(parents=True)
+                self.ops.issue(12)
+                self.ops.issues[12]["title"] = "fix: faster issue filing with clearer coordinator labels"
+                self.ops.worktree_error = "permission_denied"
+                worker = start.start_issues(repo, [12], lane="seo", tag="C3-data quality", ops=self.ops)[0]
+                self.assertEqual(worker["state"], "start_failed")
+                self.assertEqual(worker["label_tag"], "C3")
+                self.assertEqual(self.workers()[0]["label_tag"], "C3")
+                first = next(args for kind, args, _ in reversed(self.ops.calls)
+                             if kind == "herdr" and args[:2] == ("worktree", "create"))
+                expected = "C3 #12 faster issue filing with clearer"
+                self.assertEqual(first[first.index("--label") + 1], expected)
+                self.ops.issues[12]["title"] = "A changed issue title"
+                self.ops.worktree_error = "unknown_command" if fallback else None
+                self.ops.calls.clear()
+                restarted = start.restart("12", lane="seo", ops=self.ops)
+                self.assertEqual(restarted["state"], "running", restarted)
+                self.assertEqual(restarted["label_tag"], "C3")
+                command = ("workspace", "create") if fallback else ("worktree", "create")
+                workspace = next(args for kind, args, _ in self.ops.calls
+                                 if kind == "herdr" and args[:2] == command)
+                self.assertEqual(workspace[workspace.index("--label") + 1], expected)
+
+    def test_resumed_legacy_worker_without_a_label_tag_uses_the_lane_fallback(self):
+        worker = self.unstarted_worker(12)
+        registry.update(lambda doc: doc["workers"][worker["worker_id"]].pop("label_tag"))
+        worker = registry.load()["workers"][worker["worker_id"]]
+        start._create_worktree(worker, self.ops)
+        workspace = next(args for kind, args, _ in self.ops.calls
+                         if kind == "herdr" and args[:2] == ("worktree", "create"))
+        self.assertEqual(workspace[workspace.index("--label") + 1], "repo with spaces #12 Issue 12")
 
     def test_start_refuses_workers_and_queued_issues_owned_by_another_lane(self):
         self.ops.issue(12)
@@ -648,7 +689,7 @@ class StartTests(unittest.TestCase):
             if kind == "herdr" and args[:2] == ("worktree", "create"):
                 self.assertEqual(args[args.index("--base") + 1], "origin/main")
                 issue = args[args.index("--branch") + 1].split("/")[-1]
-                self.assertEqual(args[args.index("--label") + 1], f"repo with spaces #{issue}")
+                self.assertEqual(args[args.index("--label") + 1], f"repo with spaces #{issue} Issue {issue}")
                 self.assertIn("--no-focus", args)
         events = registry.read_events(0)
         self.assertEqual(len([event for event in events if event["kind"] == "worker_phase"]), 15)
@@ -1202,7 +1243,7 @@ class StartTests(unittest.TestCase):
         self.assertTrue(any(kind == "git" and args[:2] == ("worktree", "add") for kind, args, _ in self.ops.calls))
         workspace = next(args for kind, args, _ in self.ops.calls
                          if kind == "herdr" and args[:2] == ("workspace", "create"))
-        self.assertEqual(workspace[workspace.index("--label") + 1], "repo with spaces #1")
+        self.assertEqual(workspace[workspace.index("--label") + 1], "repo with spaces #1 Issue 1")
 
     def test_duplicate_issue_and_queued_retry_are_idempotent(self):
         registry.update(lambda doc: doc["config"].update(cap=0))
@@ -1273,7 +1314,7 @@ class StartTests(unittest.TestCase):
         self.ops.issue(2, [])
         output = io.StringIO()
         real_start = start.start_issues
-        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane: real_start(repo, issues, lane=lane, ops=self.ops)), mock.patch("sys.stdout", output):
+        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane, tag: real_start(repo, issues, lane=lane, tag=tag, ops=self.ops)), mock.patch("sys.stdout", output):
             self.assertEqual(herdr_coord.main(["start", str(self.repo), "1", "#2"]), 0)
         summaries = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([item["state"] for item in summaries], ["running", "refused"])
@@ -1296,7 +1337,7 @@ class StartTests(unittest.TestCase):
 
         output = io.StringIO()
         real_start = start.start_issues
-        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane: real_start(repo, issues, lane=lane, ops=self.ops)), \
+        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane, tag: real_start(repo, issues, lane=lane, tag=tag, ops=self.ops)), \
                 mock.patch.object(start, "_run_worker", side_effect=fail_third), mock.patch("sys.stdout", output):
             self.assertEqual(herdr_coord.main(["start", str(self.repo), "1", "#2", "3", "4"]), 0)
         summaries = [json.loads(line) for line in output.getvalue().splitlines()]
