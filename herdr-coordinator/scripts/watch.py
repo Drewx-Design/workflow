@@ -1087,6 +1087,17 @@ def _compact_line(event, *, lane="main"):
 def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None):
     if interval <= 0:
         raise ValueError("interval must be positive")
+    parent_pid = os.getppid()
+    try:
+        parent = start._process_identity(parent_pid)
+    except OSError:
+        parent = None  # unreadable: run without the check rather than refuse
+    else:
+        if parent is None:
+            # Already gone (Windows never reparents), so nobody reads this: take no lease.
+            print(json.dumps({"state": "stopped",
+                              "detail": "follow's launching process already exited; lease not taken"}), flush=True)
+            return 0
     cursor = registry.load()["lanes"][lane]["ack_seq"]
     lease = None
     last_beat = None
@@ -1115,6 +1126,13 @@ def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None)
                     if not refreshed:
                         return 1
                     last_beat = now
+                if parent is not None and not lanes.claim_owner_alive(parent):
+                    try:
+                        print(json.dumps({"state": "stopped",
+                                          "detail": "follow's launching process exited; lease released"}), flush=True)
+                    except OSError:
+                        pass
+                    return 0
                 if watcher_alive(now=now):
                     reported_loss = False
                     if watcher_slow(now=now):
@@ -1146,7 +1164,10 @@ def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None)
                             and event["payload"].get("state") in {"running", "in_tool", "waiting_background"}
                             and not (event["payload"].get("state") == "waiting_background"
                                      and event["payload"].get("final_message"))):
-                        print(_compact_line(event, lane=lane) if compact else json.dumps(event, ensure_ascii=False), flush=True)
+                        try:
+                            print(_compact_line(event, lane=lane) if compact else json.dumps(event, ensure_ascii=False), flush=True)
+                        except OSError:
+                            return 1
                     cursor = event["seq"]
             except TimeoutError:
                 pass  # Contention delays the event or its replay until the next interval.

@@ -2616,6 +2616,118 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(events[0]["target_lane"], "seo")
         self.assertIs(events[0]["detail"], True)
 
+    def test_follow_releases_lease_when_launching_process_exits_or_is_reused(self):
+        parent = {"pid": 42, "created": 1}
+        seq = registry.append_event("question", {"issue": 1})
+        for identity in (None, {"pid": 42, "created": 2}):
+            with self.subTest(identity=identity), \
+                    mock.patch.object(os, "getppid", return_value=42) as getppid, \
+                    mock.patch.object(start, "_process_identity", side_effect=[parent, parent, identity]) as probe, \
+                    mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 3}), \
+                    mock.patch.object(watch.time, "time", return_value=100), \
+                    mock.patch.object(watch, "watcher_alive", return_value=True), \
+                    mock.patch.object(watch, "watcher_slow", return_value=False), \
+                    mock.patch.object(watch.time, "sleep", side_effect=[None, KeyboardInterrupt]) as sleep, \
+                    mock.patch.object(registry, "read_events", wraps=registry.read_events) as reader, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(watch.follow(), 0)
+            getppid.assert_called_once_with()
+            self.assertEqual(probe.call_args_list, [mock.call(42)] * 3)
+            sleep.assert_called_once_with(5)
+            reader.assert_called_once_with(0, lane="main")
+            lines = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(lines[0]["seq"], seq)
+            self.assertEqual(lines[1:], [{"state": "stopped",
+                                         "detail": "follow's launching process exited; lease released"}])
+            self.assertIsNone(registry.load()["lanes"]["main"].get("follow_lease"))
+
+    def test_follow_with_an_already_gone_launcher_takes_no_lease(self):
+        with mock.patch.object(os, "getppid", return_value=42), \
+                mock.patch.object(start, "_process_identity", return_value=None), \
+                mock.patch.object(watch, "_claim_follow") as claim, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(watch.follow(), 0)
+        claim.assert_not_called()
+        self.assertIn("already exited", output.getvalue())
+        self.assertIsNone(registry.load()["lanes"]["main"].get("follow_lease"))
+
+    def test_follow_skips_parent_checks_when_initial_identity_is_unreadable(self):
+        for identity in (OSError("access denied"),):
+            with self.subTest(identity=identity), \
+                    mock.patch.object(os, "getppid", return_value=42), \
+                    mock.patch.object(start, "_process_identity", side_effect=[identity]) as probe, \
+                    mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 3}), \
+                    mock.patch.object(watch.time, "time", return_value=100), \
+                    mock.patch.object(watch, "watcher_alive", return_value=True) as alive, \
+                    mock.patch.object(watch, "watcher_slow", return_value=False), \
+                    mock.patch.object(watch.time, "sleep", side_effect=[None, None, KeyboardInterrupt]) as sleep, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(watch.follow(), 0)
+            probe.assert_called_once_with(42)
+            self.assertEqual(alive.call_count, 3)
+            self.assertEqual(sleep.call_count, 3)
+            self.assertEqual(output.getvalue(), "")
+            self.assertIsNone(registry.load()["lanes"]["main"].get("follow_lease"))
+
+    def test_follow_treats_parent_check_oserror_as_alive_and_checks_again(self):
+        parent = {"pid": 42, "created": 1}
+        with mock.patch.object(os, "getppid", return_value=42), \
+                mock.patch.object(start, "_process_identity", side_effect=[parent, OSError("access denied"), parent, None]) as probe, \
+                mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 3}), \
+                mock.patch.object(watch.time, "time", return_value=100), \
+                mock.patch.object(watch, "watcher_alive", return_value=True) as alive, \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch.object(watch.time, "sleep", side_effect=[None, None, KeyboardInterrupt]) as sleep, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(watch.follow(), 0)
+        self.assertEqual(probe.call_args_list, [mock.call(42)] * 4)
+        self.assertEqual(alive.call_count, 2)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(json.loads(output.getvalue())["state"], "stopped")
+        self.assertIsNone(registry.load()["lanes"]["main"].get("follow_lease"))
+
+    def test_follow_releases_lease_when_parent_stopped_line_cannot_be_written(self):
+        for error in (BrokenPipeError("reader closed"), OSError("write failed")):
+            with self.subTest(error=error), \
+                    mock.patch.object(os, "getppid", return_value=42), \
+                    mock.patch.object(start, "_process_identity", side_effect=[{"pid": 42, "created": 1}, None]), \
+                    mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 3}), \
+                    mock.patch.object(watch, "watcher_alive", return_value=True) as alive, \
+                    mock.patch.object(watch.time, "sleep", side_effect=KeyboardInterrupt) as sleep, \
+                    mock.patch("sys.stdout") as output:
+                output.write.side_effect = error
+                self.assertEqual(watch.follow(), 0)
+            output.write.assert_called_once()
+            alive.assert_not_called()
+            sleep.assert_not_called()
+            self.assertIsNone(registry.load()["lanes"]["main"].get("follow_lease"))
+
+    def test_follow_stdout_failure_returns_one_releases_lease_and_leaves_events_unacked(self):
+        seq = registry.append_event("question", {"issue": 1})
+        registry.append_event("done", {"issue": 2})
+        expected = registry.read_events(0)
+        for compact in (False, True):
+            for error in (BrokenPipeError("reader closed"), OSError("write failed"), TimeoutError("write timed out")):
+                with self.subTest(compact=compact, error=error), \
+                        mock.patch.object(os, "getppid", return_value=42), \
+                        mock.patch.object(start, "_process_identity", return_value={"pid": 42, "created": 1}), \
+                        mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 3}), \
+                        mock.patch.object(watch, "watcher_alive", return_value=True), \
+                        mock.patch.object(watch, "watcher_slow", return_value=False), \
+                        mock.patch.object(watch.time, "sleep", side_effect=KeyboardInterrupt) as sleep, \
+                        mock.patch.object(registry, "ack") as ack, \
+                        mock.patch("sys.stdout") as output:
+                    output.write.side_effect = error
+                    self.assertEqual(watch.follow(compact=compact), 1)
+                output.write.assert_called_once()
+                self.assertEqual(json.loads(output.write.call_args.args[0])["seq"], seq)
+                sleep.assert_not_called()
+                ack.assert_not_called()
+                current = registry.load()["lanes"]["main"]
+                self.assertIsNone(current.get("follow_lease"))
+                self.assertEqual(current["ack_seq"], 0)
+                self.assertEqual(registry.read_events(current["ack_seq"]), expected)
+
     def test_follow_lease_refuses_second_then_releases(self):
         self.seo_worker()
         lease = watch._claim_follow("seo", now=100, context=self.seo_context)
