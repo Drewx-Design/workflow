@@ -565,6 +565,58 @@ class WatchTests(unittest.TestCase):
         watch.poll_once(ops=self.ops, now=110)
         self.assertEqual(actions.worker_named("worker").get("advanced_stage"), "lfg")
 
+    def test_plan_poll_ignores_own_entry_then_records_a_build_stage(self):
+        entry = copy.deepcopy(PROMPT)
+        entry["message"]["content"] = "<command-name>/ce-plan</command-name>"
+        self.set_state("running", entry_command="ce-plan")
+        self.seed_records([entry, TOOL, RESULT])
+        watch.poll_once(ops=self.ops, now=100)
+        self.assertNotIn("advanced_stage", actions.worker_named("worker"))
+        build = copy.deepcopy(PROMPT)
+        build["message"]["content"] = "<command-name>/ce-work</command-name>"
+        self.ops.write("session-1", [build, TOOL, RESULT], append=True)
+        watch.poll_once(ops=self.ops, now=110)
+        self.assertEqual(actions.worker_named("worker")["advanced_stage"], "ce-work")
+
+    def test_plan_verification_ignores_own_entry_and_remembers_a_build_after_trimming(self):
+        plan = Path(self.temp.name) / "plans" / "x-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("---\nartifact_contract: ce-unified-plan/v1\n"
+                        "product_contract_source: ce-plan-bootstrap\n---\n", encoding="utf-8")
+        entry = copy.deepcopy(PROMPT)
+        entry["message"]["content"] = "<command-name>/compound-engineering:ce-plan</command-name>"
+        final = copy.deepcopy(END)
+        final["message"]["content"] = "Plan ready at `plans/x-plan.md`. What would you like to do next?"
+        self.set_state("running", entry_command="/compound-engineering:ce-plan")
+        self.ops.verify_done = None
+        git = FinishOps()
+        git.git_status.stdout = "?? plans/x-plan.md\0"
+        git.prs = success([])
+        self.ops.git, self.ops.gh = git.git, git.gh
+        watch._verify(actions.worker_named("worker"), [entry, final], self.ops, 100)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["state"], "done")
+        self.assertEqual(worker["detail"], f"plan artifact written: {plan}")
+        self.assertNotIn("advanced_stage", worker)
+        self.assertFalse([call for call in git.calls if call[0] == "gh"])
+
+        stage = {"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_stage", "name": "Skill",
+             "input": {"skill": "compound-engineering:ce-work", "args": "plans/x-plan.md"}}]}}
+        launched = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": [
+            {"tool_use_id": "toolu_stage", "type": "tool_result", "content": "Launching skill: ce-work"}]}}
+        self.set_state("running", reopen_action_id="relay-1")
+        registry.update(lambda doc: doc["actions"].update({"relay-1": {
+            "session_id": worker["session_id"], "transcript_position": 3}}))
+        watch._verify(actions.worker_named("worker"), [entry, stage, launched, PROMPT, final], self.ops, 110)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["state"], "ended_without_proof")
+        self.assertEqual(worker["detail"], "no open PR on the worker branch")
+        self.assertEqual(worker["advanced_stage"], "ce-work")
+        self.set_state("running")
+        watch._verify(actions.worker_named("worker"), [PROMPT] * 4 + [final], self.ops, 120)
+        self.assertEqual(actions.worker_named("worker")["detail"], "no open PR on the worker branch")
+
     def test_no_closing_record_cannot_finish_from_previous_turn_artifact(self):
         artifact = Path(self.temp.name) / "plans" / "previous.md"
         artifact.parent.mkdir()

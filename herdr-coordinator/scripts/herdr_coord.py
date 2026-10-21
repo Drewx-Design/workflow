@@ -79,9 +79,11 @@ def main(argv=None):
     commands.add_parser("revive-watchers",
                         help="at logon: relaunch each repository's watcher behind a hold, if it has live workers")
     command = commands.add_parser("cleanup", help="remove merged, exited workers' worktrees")
-    command.add_argument("--abandon", metavar="NAME", help="mark this worker abandoned before cleaning")
-    command.add_argument("--merged-pr", nargs=2, metavar=("NAME", "PR"),
-                         help="this finished worker's work merged as PR (verified on GitHub) before cleaning")
+    command.add_argument("--abandon", metavar="NAME_OR_ISSUE",
+                         help="mark this worker (agent name or issue number) abandoned before cleaning")
+    command.add_argument("--merged-pr", nargs=2, metavar=("NAME_OR_ISSUE", "PR"),
+                         help="this finished worker's (agent name or issue number) work merged as PR "
+                              "(verified on GitHub) before cleaning")
     command = commands.add_parser("retire-legacy", help="archive the old shared coordinator state")
     command.add_argument("--abandon", metavar="NAME", action="append", default=[],
                          help="acknowledge a lost legacy worker (repeat for each name)")
@@ -690,9 +692,15 @@ def _cleanup(abandon=None, *, merged_pr=None, lane="main", ops=None):
     only = abandon or (merged_pr[0] if merged_pr else None)
     named_worker = None
     if only:
-        named_worker = next((w for w in registry.load()["workers"].values() if w.get("agent_name") == only), None)
-        if named_worker is None:
+        workers = registry.load()["workers"].values()
+        matches = [w for w in workers if w.get("agent_name") == str(only)]
+        if not matches:
+            matches = [w for w in workers if str(w.get("issue")) == str(only).removeprefix("#")]
+        if not matches:
             raise ValueError(f"no worker named {only}")
+        if len(matches) != 1:
+            raise ValueError(f"expected one worker matching {only}, found {len(matches)}")
+        named_worker = matches[0]
         lanes.check_worker_lane(named_worker, lane)
     number = None
     if merged_pr:

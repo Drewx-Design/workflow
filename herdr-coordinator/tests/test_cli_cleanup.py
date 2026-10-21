@@ -36,6 +36,93 @@ class CleanupCommandTest(unittest.TestCase):
         self.env.stop()
         self.home.cleanup()
 
+    def test_named_cleanup_resolves_issue_numbers_and_agent_names(self):
+        for option in ("abandon", "merged_pr"):
+            for name in ("1930", "#1930", "a-1930"):
+                with self.subTest(option=option, name=name):
+                    worker = {"worker_id": "w-1930", "issue": 1930, "agent_name": "a-1930",
+                              "state": "ended_without_proof", "repo_path": self.home.name}
+                    registry.update(lambda doc: doc["workers"].update({"w-1930": worker}))
+                    options = {"abandon": name} if option == "abandon" else {"merged_pr": (name, "9")}
+                    with mock.patch.object(finish, "cleanup", return_value={"cleaned": True}) as cleanup, \
+                            mock.patch.object(finish, "named_pr_merged", return_value=(True, "")):
+                        result = herdr_coord._cleanup(ops=object(), **options)
+                    cleanup.assert_called_once()
+                    self.assertEqual(cleanup.call_args.args[0]["worker_id"], "w-1930")
+                    self.assertEqual(result["results"], [{"issue": 1930, "cleaned": True}])
+                    self.assertEqual(registry.load()["workers"]["w-done"]["state"], "done")
+
+    def test_named_cleanup_prefers_an_agent_name_over_an_issue_number(self):
+        for options in ({"abandon": "1930"}, {"merged_pr": ("1930", "9")}):
+            with self.subTest(options=options):
+                registry.update(lambda doc: doc["workers"].update({
+                    "w-issue": {"worker_id": "w-issue", "issue": 1930, "state": "done"},
+                    "w-agent": {"worker_id": "w-agent", "issue": 1931, "agent_name": "1930", "state": "done"},
+                }))
+                with mock.patch.object(finish, "cleanup", return_value={"cleaned": True}) as cleanup, \
+                        mock.patch.object(finish, "named_pr_merged", return_value=(True, "")):
+                    herdr_coord._cleanup(ops=object(), **options)
+                cleanup.assert_called_once()
+                self.assertEqual(cleanup.call_args.args[0]["worker_id"], "w-agent")
+                self.assertEqual(registry.load()["workers"]["w-issue"]["state"], "done")
+
+    def test_named_cleanup_refuses_ambiguous_issue_or_agent_matches(self):
+        for by_agent in (False, True):
+            for option in ("abandon", "merged_pr"):
+                with self.subTest(by_agent=by_agent, option=option):
+                    name = "shared-agent" if by_agent else "#1930"
+                    registry.update(lambda doc: doc["workers"].update({
+                        "w-first": {"worker_id": "w-first", "issue": 1930, "state": "done",
+                                    "agent_name": "shared-agent" if by_agent else "first-agent"},
+                        "w-second": {"worker_id": "w-second", "issue": 1931 if by_agent else 1930,
+                                     "state": "done", "lane": "seo",
+                                     "agent_name": "shared-agent" if by_agent else "second-agent"},
+                    }))
+                    before = registry.load()
+                    options = {"abandon": name} if option == "abandon" else {"merged_pr": (name, "9")}
+                    with mock.patch.object(finish, "cleanup") as cleanup, \
+                            mock.patch.object(finish, "named_pr_merged") as merged:
+                        with self.assertRaisesRegex(ValueError, "found 2"):
+                            herdr_coord._cleanup(ops=object(), **options)
+                    cleanup.assert_not_called()
+                    merged.assert_not_called()
+                    self.assertEqual(registry.load(), before)
+
+    def test_named_cleanup_by_issue_refuses_another_lane_without_marks(self):
+        registry.update(lambda doc: doc["workers"]["w-done"].update(issue=1930, lane="seo"))
+        before = registry.load()
+        for name in ("1930", "#1930"):
+            for options in ({"abandon": name}, {"merged_pr": (name, "9")}):
+                with self.subTest(options=options), mock.patch.object(finish, "cleanup") as cleanup, \
+                        mock.patch.object(finish, "named_pr_merged") as merged:
+                    with self.assertRaisesRegex(ValueError, "lane seo"):
+                        herdr_coord._cleanup(ops=object(), **options)
+                    cleanup.assert_not_called()
+                    merged.assert_not_called()
+                    self.assertEqual(registry.load(), before)
+
+    def test_abandon_by_issue_cleans_a_worker_that_never_had_an_agent(self):
+        from test_finish import FakeOps
+
+        worktree = Path(self.home.name) / "unrecorded tree"
+        worktree.mkdir()
+        registry.update(lambda doc: doc["workers"].update({"w-1930": {
+            "worker_id": "w-1930", "issue": 1930, "state": "start_failed", "phase": None,
+            "branch": "issue/1930", "repo_path": self.home.name, "worktree_path": str(worktree),
+        }}))
+        ops = FakeOps()
+
+        result = herdr_coord._cleanup("1930", ops=ops)
+
+        self.assertTrue(result["results"][0]["cleaned"])
+        worker = registry.load()["workers"]["w-1930"]
+        self.assertEqual(worker["state"], "cleaned")
+        self.assertTrue(worker["abandoned"])
+        self.assertEqual(worker["branch"], "issue/1930")
+        self.assertEqual([(kind, args) for kind, args, _ in ops.calls], [
+            ("git", ("worktree", "remove", str(worktree))),
+        ])
+
     def test_cleans_only_eligible_workers_and_records_the_result(self):
         calls = []
 

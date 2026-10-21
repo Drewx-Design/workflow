@@ -154,12 +154,8 @@ _HTML_SOURCE = re.compile(r"(?:product[_ ])?contract[_ ]source\W{0,20}ce-brainst
 _PLAN_READ_LIMIT = 4 * 1024 * 1024  # an HTML plan may inline a large stylesheet before its header
 
 
-def _is_brainstorm_plan(path):
-    """A ce-brainstorm requirements plan: under a plans directory, marked with the brainstorm contract.
-
-    ce-brainstorm writes <root>/plans/...-plan.<md|html> with artifact_contract ce-unified-plan/v1
-    and product_contract_source ce-brainstorm; a solutions note or any other file it writes is not one.
-    """
+def _has_plan_metadata(path, *, require_brainstorm_source=False):
+    """Read the unified plan contract from frontmatter or visible HTML metadata."""
     if path.parent.name.lower() != "plans":
         return False
     try:
@@ -175,11 +171,23 @@ def _is_brainstorm_plan(path):
         if end is None:
             return False
         text = "\n".join(lines[1:end])
-        return bool(_CONTRACT_LINE.search(text) and _SOURCE_LINE.search(text))
+        return bool(_CONTRACT_LINE.search(text)
+                    and (not require_brainstorm_source or _SOURCE_LINE.search(text)))
     # The HTML rendering shows this metadata as visible text rather than frontmatter.
     visible = re.sub(r"\s+", " ", html.unescape(re.sub(r"<style\b.*?</style>|<script\b.*?</script>|<[^>]+>", " ",
                                                        text, flags=re.IGNORECASE | re.DOTALL)))
-    return bool(_HTML_CONTRACT.search(visible) and _HTML_SOURCE.search(visible))
+    return bool(_HTML_CONTRACT.search(visible)
+                and (not require_brainstorm_source or _HTML_SOURCE.search(visible)))
+
+
+def _is_brainstorm_plan(path):
+    """A requirements plan under a plans directory, with the ce-brainstorm source contract."""
+    return _has_plan_metadata(path, require_brainstorm_source=True)
+
+
+def _is_unified_plan(path):
+    """A unified plan under a plans directory, regardless of its product contract source."""
+    return _has_plan_metadata(path)
 
 
 LATER_STAGES = frozenset({"ce-plan", "ce-work", "ce-debug", "lfg"})
@@ -190,13 +198,15 @@ def _stage_name(name):
     return name.strip().lstrip("/").rsplit(":", 1)[-1] if isinstance(name, str) else None
 
 
-def later_stage(records):
+def later_stage(records, *, exclude=()):
     """The first build stage (ce-plan, ce-work, ce-debug, lfg) this transcript started, or None.
 
-    A brainstorm or strategy worker may carry on into planning and building in the same session;
-    its requirements document then no longer proves the run finished. A Skill call counts once its
+    Exclude a plan worker's own entry stage. A brainstorm or strategy worker may carry on into
+    planning and building in the same session; its requirements document then no longer proves the
+    run finished. A Skill call counts once its
     result arrives without an error, so a denied call does not move the run on.
     """
+    stages = LATER_STAGES.difference(exclude)
     calls = {}
     for record in records:
         if record.get("type") not in {"assistant", "user"} or record.get("isSidechain", False) is not False:
@@ -211,7 +221,7 @@ def later_stage(records):
                 if not isinstance(text, str) or not text.lstrip().startswith(("<command-message>", "<command-name>")):
                     continue
                 match = _COMMAND_NAME.search(text)
-                if match and _stage_name(match.group(1)) in LATER_STAGES:
+                if match and _stage_name(match.group(1)) in stages:
                     return _stage_name(match.group(1))
             for block in content if isinstance(content, list) else []:
                 if (isinstance(block, dict) and block.get("type") == "tool_result"
@@ -221,7 +231,7 @@ def later_stage(records):
         for block in content if isinstance(content, list) else []:
             if (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Skill"
                     and isinstance(block.get("input"), dict) and isinstance(block.get("id"), str) and block["id"]
-                    and _stage_name(block["input"].get("skill")) in LATER_STAGES):
+                    and _stage_name(block["input"].get("skill")) in stages):
                 calls[block["id"]] = _stage_name(block["input"]["skill"])
     return None
 
@@ -249,7 +259,7 @@ def _diff_paths(output):
 def _changed_beyond(artifact, worker, ops):
     """True when the branch or its tracked files changed anything but the artifact, or git cannot say.
 
-    A brainstorm or strategy run writes its document; code changes mean it went on to build,
+    A brainstorm, strategy or plan run writes its document; code changes mean it went on to build,
     however that started.
     """
     worktree = worker.get("worktree_path")
@@ -319,8 +329,10 @@ def verify_done(worker: dict, *, ops, config: dict, now: float, records: list[di
     final = _last_assistant_text(records)
     command = worker.get("entry_command", "").lstrip("/").rsplit(":", 1)[-1]
     # The watcher records the stage from the whole transcript; these records may be trimmed.
-    advanced = worker.get("advanced_stage") or later_stage(records)
-    if command in {"ce-brainstorm", "ce-strategy"} and advanced:
+    advanced = worker.get("advanced_stage") or later_stage(
+        records, exclude={"ce-plan"} if command == "ce-plan" else (),
+    )
+    if command in {"ce-brainstorm", "ce-strategy", "ce-plan"} and advanced:
         command = "ce-work"  # the run went on to build, so only a PR proves it finished
     if command == "ce-brainstorm":
         artifact = _artifact(final, worker.get("worktree_path"), ops=ops, worker=worker, records=records,
@@ -333,6 +345,19 @@ def verify_done(worker: dict, *, ops, config: dict, now: float, records: list[di
             return _decision(
                 "ended_without_proof",
                 "final message names no requirements plan this worker wrote under the plans directory",
+                final_message=final,
+            )
+    if command == "ce-plan":
+        artifact = _artifact(final, worker.get("worktree_path"), ops=ops, worker=worker, records=records,
+                             accept=_is_unified_plan)
+        if artifact and _changed_beyond(artifact, worker, ops):
+            command = "ce-work"
+        elif artifact:
+            return _decision("done", f"plan artifact written: {artifact}", final_message=final)
+        else:
+            return _decision(
+                "ended_without_proof",
+                "final message names no plan this worker wrote under the plans directory",
                 final_message=final,
             )
     if command == "ce-strategy":
@@ -605,18 +630,19 @@ def cleanup(worker: dict, *, ops) -> dict:
             prs = [pr for pr in prs if pr["number"] == worker["pr"]]
         if not prs or _latest(prs)["state"].upper() != "MERGED":
             return {"cleaned": False, "reason": "worker PR is not merged"}
-    if not worker.get("agent_name") or not worker.get("repo_path") or not worker.get("worktree_path"):
-        return {"cleaned": False, "reason": "worker lacks agent, repository, or worktree identity"}
+    if not worker.get("repo_path") or not worker.get("worktree_path"):
+        return {"cleaned": False, "reason": "worker lacks repository or worktree identity"}
     unlinked = []
     try:
-        agent = ops.herdr("agent", "get", worker["agent_name"], timeout=COMMAND_TIMEOUT)
-        if agent.ok:
-            refusal = _close_refusal(worker, agent, ops)
-            if refusal:
-                return {"cleaned": False, "reason": refusal}
-            # Closing the workspace below ends the idle agent.
-        elif not _missing(agent, "agent"):
-            return {"cleaned": False, "reason": f"cannot confirm agent exit: {_reason(agent)}"}
+        if worker.get("agent_name"):
+            agent = ops.herdr("agent", "get", worker["agent_name"], timeout=COMMAND_TIMEOUT)
+            if agent.ok:
+                refusal = _close_refusal(worker, agent, ops)
+                if refusal:
+                    return {"cleaned": False, "reason": refusal}
+                # Closing the workspace below ends the idle agent.
+            elif not _missing(agent, "agent"):
+                return {"cleaned": False, "reason": f"cannot confirm agent exit: {_reason(agent)}"}
         workspace = worker.get("workspace_id")
         if workspace:
             closed = ops.herdr("workspace", "close", workspace, timeout=COMMAND_TIMEOUT)
@@ -627,7 +653,7 @@ def cleanup(worker: dict, *, ops) -> dict:
         if refusal:
             return {"cleaned": False, "reason": refusal + _unlinked_note(unlinked)}
         removed = None
-        if workspace and closed.ok:
+        if worker.get("agent_name") and workspace and closed.ok:
             removed = ops.herdr("worktree", "remove", "--workspace", workspace, timeout=COMMAND_TIMEOUT)
         # Live herdr (2026-10-15) drops the closed workspace, so removing by it fails with
         # workspace_not_found; the checkout is then removed through git, as on a later pass.

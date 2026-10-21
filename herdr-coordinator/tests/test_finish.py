@@ -344,6 +344,92 @@ class FinishTest(unittest.TestCase):
         self.assertNotEqual(result.get("reason"), "unsupported entry command")
         self.assertTrue([call for call in self.ops.calls if call[0] == "gh"])
 
+    def test_plan_written_artifact_is_done(self):
+        artifact = self.artifact("docs/plans/x-plan.md")
+        artifact.write_text(PLAN_TEXT.replace("ce-brainstorm", "ce-plan-bootstrap"), encoding="utf-8")
+        final = "Plan ready at docs/plans/x-plan.md. What would you like to do next?"
+        for command, status, diff, writes in (
+            ("ce-plan", "?? docs/plans/x-plan.md\0", "", []),
+            ("/compound-engineering:ce-plan", "", "docs/plans/x-plan.md\0", []),
+            ("ce-plan", "", "", self.wrote(artifact)),
+            ("ce-plan", "", "", self.wrote(artifact, tool="Edit")),
+        ):
+            with self.subTest(command=command, status=status, diff=diff, writes=bool(writes)):
+                self.worker["entry_command"] = command
+                self.ops.git_status.stdout = status
+                self.ops.git_diff.stdout = diff
+                self.records = [*writes, *records_with_final(final)]
+                self.ops.calls.clear()
+                result = self.verify()
+                self.assertEqual(result["state"], "done")
+                self.assertEqual(result["detail"], f"plan artifact written: {artifact}")
+                self.assertEqual(result["final_message"], final)
+                self.assertIsNone(result["pr"])
+                self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
+
+    def test_plan_without_written_artifact_is_not_proof(self):
+        self.worker["entry_command"] = "ce-plan"
+        self.artifact("docs/plans/existing.md")
+        for final in ("Planning finished.", "Plan ready at docs/plans/existing.md."):
+            with self.subTest(final=final):
+                self.records = records_with_final(final)
+                self.ops.calls.clear()
+                result = self.verify()
+                self.assertEqual(result["state"], "ended_without_proof")
+                self.assertEqual(result["detail"],
+                                 "final message names no plan this worker wrote under the plans directory")
+                self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
+
+    def test_plan_that_changed_code_needs_a_pr(self):
+        self.worker["entry_command"] = "ce-plan"
+        self.artifact()
+        self.records = records_with_final("Plan ready at docs/plans/x-requirements.md.")
+        for status, diff in (
+            ("?? docs/plans/x-requirements.md\0 M src/app.py\0", ""),
+            ("", "docs/plans/x-requirements.md\0src/app.py\0"),
+        ):
+            with self.subTest(status=status, diff=diff):
+                self.ops.git_status.stdout = status
+                self.ops.git_diff.stdout = diff
+                self.ops.prs = success([])
+                result = self.verify()
+                self.assertEqual(result["state"], "ended_without_proof")
+                self.assertEqual(result["detail"], "no open PR on the worker branch")
+                self.ops.prs = success([pr()])
+                self.assertEqual(self.verify()["pr"], 42)
+
+    def test_plan_that_moved_on_to_build_needs_a_pr(self):
+        self.worker["entry_command"] = "ce-plan"
+        self.artifact()
+        self.worker_wrote("docs/plans/x-requirements.md")
+        final = records_with_final("Plan ready at docs/plans/x-requirements.md.")
+        entry = self.command("ce-plan")
+        for stage in ("ce-work", "ce-debug", "lfg"):
+            for advanced in (self.stage(f"compound-engineering:{stage}"), [self.command(stage)]):
+                with self.subTest(stage=stage, kind=advanced[0]["type"]):
+                    self.records = [entry, *advanced, *final]
+                    self.ops.prs = success([])
+                    result = self.verify()
+                    self.assertEqual(result["state"], "ended_without_proof")
+                    self.assertEqual(result["detail"], "no open PR on the worker branch")
+                    self.ops.prs = success([pr()])
+                    self.assertEqual(self.verify()["pr"], 42)
+
+    def test_plan_own_entry_does_not_advance_the_run(self):
+        self.worker["entry_command"] = "ce-plan"
+        self.artifact()
+        self.worker_wrote("docs/plans/x-requirements.md")
+        final = records_with_final("Plan ready at docs/plans/x-requirements.md.")
+        for entry in ("ce-plan", "compound-engineering:ce-plan"):
+            with self.subTest(entry=entry):
+                records = [self.command(entry), *self.stage(entry)]
+                self.assertEqual(finish.later_stage(records), "ce-plan")
+                self.assertIsNone(finish.later_stage(records, exclude={"ce-plan"}))
+                self.records = [*records, *final]
+                self.ops.calls.clear()
+                self.assertEqual(self.verify()["state"], "done")
+                self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
+
     def test_brainstorm_html_and_paths_with_spaces(self):
         self.worker["entry_command"] = "ce-brainstorm"
         artifact = self.artifact("docs/my work/plans/x requirements.html")
@@ -519,6 +605,28 @@ class FinishTest(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
                 self.assertEqual(finish._is_brainstorm_plan(path), expected)
 
+    def test_unified_plan_shapes(self):
+        for name, content, expected in (
+            ("docs/plans/bootstrap.md", PLAN_TEXT.replace("ce-brainstorm", "ce-plan-bootstrap"), True),
+            ("docs/plans/brainstorm.md", PLAN_TEXT, True),
+            ("docs/plans/other-source.md", PLAN_TEXT.replace("ce-brainstorm", "other"), True),
+            ("docs/plans/a.html", "<header><p>Artifact contract: ce-unified-plan/v1</p>"
+             "<p>Product contract source: ce-plan-bootstrap</p></header>", True),
+            ("docs/plans/entities.html", "<p>Artifact&nbsp;contract &mdash; ce-unified-plan/v1</p>"
+             "<p>Contract source: ce-brainstorm</p>", True),
+            ("docs/x-plan.md", PLAN_TEXT, False),
+            ("docs/solutions/x-note.md", PLAN_TEXT, False),
+            ("docs/plans/no-contract.md", "---\ntitle: Plan\n---\n# Plan\n", False),
+            ("docs/plans/body-only.md", "# Plan\n\nartifact_contract: ce-unified-plan/v1\n", False),
+            ("docs/plans/other-contract.md", PLAN_TEXT.replace("/v1", "/v2"), False),
+            ("docs/plans/hidden.html", "<style>artifact_contract: ce-unified-plan/v1</style>"
+             "<script>artifact_contract: ce-unified-plan/v1</script><p>Plan</p>", False),
+        ):
+            with self.subTest(name=name):
+                path = self.artifact(name)
+                path.write_text(content, encoding="utf-8")
+                self.assertEqual(finish._is_unified_plan(path), expected)
+
     def test_brainstorm_missing_outside_and_non_artifact_paths(self):
         self.worker["entry_command"] = "ce-brainstorm"
         outside = self.root / "outside-requirements.md"
@@ -628,6 +736,73 @@ class FinishTest(unittest.TestCase):
         self.ops.agent = failure("No agent occupies the pane", "agent_not_found")
         self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
         self.assertTrue(all(call[0] != "gh" for call in self.ops.calls))
+
+    def test_cleanup_without_an_agent_removes_through_git_and_keeps_the_branch(self):
+        self.worker.pop("agent_name")
+        self.worker.update(state="start_failed", abandoned=True)
+        self.ops.agent = AssertionError("no agent was ever started")
+        self.ops.remove = AssertionError("a no-agent worktree is removed through git")
+        self.ops.prs = AssertionError("abandoned worker must not query GitHub")
+        for workspace in (None, "workspace-7"):
+            with self.subTest(workspace=workspace):
+                self.worker["workspace_id"] = workspace
+                before = copy.deepcopy(self.worker)
+                self.ops.calls.clear()
+
+                result = finish.cleanup(self.worker, ops=self.ops)
+
+                self.assertTrue(result["cleaned"])
+                self.assertIn("branch retained", result["reason"])
+                expected = [("herdr", ("workspace", "close", workspace))] if workspace else []
+                expected.append(("git", ("worktree", "remove", str(self.worktree))))
+                self.assertEqual([(kind, args) for kind, args, _ in self.ops.calls], expected)
+                self.assertEqual(self.ops.calls[-1][2]["cwd"], str(self.repo))
+                self.assertEqual(self.worker, before)
+
+    def test_cleanup_without_an_agent_refuses_a_dirty_registered_worktree(self):
+        self.worker.pop("agent_name")
+        self.worker.pop("workspace_id")
+        self.worker.update(state="start_failed", abandoned=True)
+        marker = self.worktree / "notes.md"
+        marker.write_text("keep", encoding="utf-8")
+        self.ops.git_remove = failure("worktree contains modified or untracked files")
+
+        result = finish.cleanup(self.worker, ops=self.ops)
+
+        self.assertFalse(result["cleaned"])
+        self.assertIn("modified or untracked files", result["reason"])
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+        self.assertEqual([(kind, args) for kind, args, _ in self.ops.calls], [
+            ("git", ("worktree", "remove", str(self.worktree))),
+            ("git", ("worktree", "list", "--porcelain")),
+        ])
+        self.assertEqual(self.worker["branch"], "issue/7")
+
+    def test_cleanup_without_an_agent_settles_an_already_removed_worktree(self):
+        self.worker.pop("agent_name")
+        self.worker.pop("workspace_id")
+        self.worker.update(state="start_failed", abandoned=True)
+        self.worktree.rmdir()
+        self.ops.git_remove = failure(f"fatal: '{self.worktree}' is not a working tree")
+        self.ops.git_list = self.listing()
+
+        with mock.patch.object(finish, "_finish_unregistered", wraps=finish._finish_unregistered) as settle:
+            result = finish.cleanup(self.worker, ops=self.ops)
+
+        settle.assert_called_once_with(self.worker, self.ops)
+        self.assertEqual(result, {"cleaned": True, "reason": "worktree was already removed; branch retained"})
+        self.assertTrue(all(kind == "git" for kind, _, _ in self.ops.calls))
+
+    def test_cleanup_without_an_agent_still_requires_repository_and_worktree_identity(self):
+        self.worker.pop("agent_name")
+        self.worker.update(state="start_failed", abandoned=True)
+        for missing in ("repo_path", "worktree_path"):
+            with self.subTest(missing=missing):
+                worker = {**self.worker, missing: None}
+                result = finish.cleanup(worker, ops=self.ops)
+                self.assertFalse(result["cleaned"])
+                self.assertIn("identity", result["reason"])
+                self.assertEqual(self.ops.calls, [])
 
     def listing(self, *trees):
         return adapters.CommandResult(True, 0, "".join(f"worktree {Path(tree).as_posix()}\nHEAD abc\nbranch refs/heads/x\n\n"

@@ -98,10 +98,10 @@ def parse_entry_command(labels: list[str], body: str) -> tuple[str, str] | None:
     """
     commands = {
         "ce:work": "ce-work", "ce:debug": "ce-debug", "ce:lfg": "lfg",
-        "ce:brainstorm": "ce-brainstorm", "ce:strategy": "ce-strategy",
+        "ce:brainstorm": "ce-brainstorm", "ce:strategy": "ce-strategy", "ce:plan": "ce-plan",
     }
     match = re.search(
-        r"^[ \t]*CE entry:[ \t]*/(ce-work|ce-debug|lfg|ce-brainstorm|ce-strategy)"
+        r"^[ \t]*CE entry:[ \t]*/(ce-work|ce-debug|lfg|ce-brainstorm|ce-strategy|ce-plan)"
         r"(?:[ \t]+([^\r\n]*))?[ \t]*\r?$", body, re.MULTILINE,
     )
     if match:
@@ -225,10 +225,42 @@ def _wait_for_path(path):
         time.sleep(min(POLL_INTERVAL, remaining))
 
 
+def _refuse_open_workspace(path, target, ops):
+    workspaces = _envelope(_call(ops.herdr, "workspace", "list", timeout=COMMAND_TIMEOUT)).get("workspaces")
+    if not isinstance(workspaces, list):
+        raise StartError("herdr returned invalid workspace list")
+    for workspace in workspaces:
+        checkout = (workspace.get("worktree") or {}).get("checkout_path")
+        if checkout and os.path.normcase(os.path.realpath(checkout)) == target:
+            raise StartError(f"{path} already has herdr workspace {workspace.get('workspace_id')}")
+
+
 def _create_worktree(worker, ops):
     worker_id = worker["worker_id"]
     lane = worker.get("lane", "main")
     label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"])
+    path = worker["worktree_path"]
+    target = os.path.normcase(os.path.realpath(path))
+    if not worker.get("worktree_created") and Path(path).exists():
+        listed = _call(ops.git, "worktree", "list", "--porcelain",
+                       cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
+        registration = None
+        for record in re.split(r"\r?\n\r?\n", listed.stdout):
+            lines = record.splitlines()
+            if any(os.path.normcase(os.path.realpath(line[len("worktree "):])) == target
+                   for line in lines if line.startswith("worktree ")):
+                registration = lines
+                break
+        if registration is None:
+            raise StartError(f"{path} already exists but is not a registered worktree")
+        if f"branch refs/heads/{worker['branch']}" not in registration:
+            raise StartError(f"{path} is not registered on branch {worker['branch']}")
+        status = _call(ops.git, "status", "--porcelain", cwd=path, timeout=COMMAND_TIMEOUT)
+        if status.stdout.strip():
+            raise StartError(f"{path} has uncommitted changes")
+        # Adopted in memory only: it is recorded with the workspace created for it below, so a refusal
+        # or failure in between never marks the tree as one cleanup may remove.
+        worker = {**worker, "worktree_created": True}
     if not worker.get("worktree_created"):
         _call(ops.git, "fetch", "origin", cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
         result = _run(
@@ -263,13 +295,14 @@ def _create_worktree(worker, ops):
         )
         worker = _record(worker_id, "worktree_created", worktree_created=True)
     _wait_for_path(worker["worktree_path"])
+    _refuse_open_workspace(path, target, ops)
     result = _call(
         ops.herdr, "workspace", "create", "--cwd", worker["worktree_path"],
         "--label", label, "--no-focus", timeout=COMMAND_TIMEOUT,
     )
     envelope = _envelope(result)
     return _record(
-        worker_id, "worker_phase", phase="worktree",
+        worker_id, "worker_phase", phase="worktree", worktree_created=True,
         workspace_id=envelope.get("workspace", {}).get("workspace_id"),
         pane_id=envelope.get("root_pane", {}).get("pane_id"),
     )
@@ -596,11 +629,16 @@ def restart(name, *, lane="main", ops=adapters) -> dict:
         lanes.check_worker_lane(worker, lane)
         if doc["holds"]:
             raise ValueError("cannot restart while a hold is open; run go first")
-        if worker.get("state") == "start_failed" and _entry_retryable(doc, worker):
+        if (worker.get("state") == "start_failed" and not worker.get("agent_name")
+                and worker.get("phase") is None):
+            # It failed before reaching agent start, so no agent can exist. A failed agent start
+            # (phase "worktree") may have timed out with its agent running, and stays refused.
+            pass
+        elif worker.get("state") == "start_failed" and _entry_retryable(doc, worker):
             resend.append(True)
         elif worker.get("state") != "start_interrupted":
             raise ValueError("restart requires a start_interrupted worker, or a start_failed one "
-                             "whose entry never reached its session")
+                             "before agent start or whose entry never reached its session")
         if not _has_slot(doc):
             raise ValueError("no slot available for restart")
         worker.update(state="starting", start_owner=owner)

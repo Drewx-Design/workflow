@@ -310,8 +310,10 @@ def _read(worker, ops, now):
     _TRANSCRIPTS[key] = _TranscriptCache(str(path), records, new_offset)
     # Record a move on to build as soon as it is seen, with the offset that covers it: a later session
     # change drops these records. The scan is cheap (about 2 ms for 3,000 records).
-    stage = (finish.later_stage(records) if not worker.get("advanced_stage")
-             and _entry(worker) in {"ce-brainstorm", "ce-strategy"} else None)
+    entry = _entry(worker)
+    stage = (finish.later_stage(records, exclude={"ce-plan"} if entry == "ce-plan" else ())
+             if not worker.get("advanced_stage")
+             and entry in {"ce-brainstorm", "ce-strategy", "ce-plan"} else None)
 
     def remember(doc):
         current = doc["workers"][worker["worker_id"]]
@@ -503,8 +505,10 @@ def _wait_background(worker, observed, now, state):
 
 def _verify(worker, records, ops, now, *, no_closing_record=False):
     # Read the stage from the whole session before trimming: a relay after the worker moved on to
-    # ce-work would otherwise hide that it left its brainstorm. Once seen, the registry keeps it.
-    advanced_stage = worker.get("advanced_stage") or finish.later_stage(records)
+    # ce-work would otherwise hide that it left its document. Once seen, the registry keeps it.
+    advanced_stage = worker.get("advanced_stage") or finish.later_stage(
+        records, exclude={"ce-plan"} if _entry(worker) == "ce-plan" else (),
+    )
     if advanced_stage:
         worker = {**worker, "advanced_stage": advanced_stage}
     records = _reopen_records(worker, records)

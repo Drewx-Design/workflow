@@ -72,6 +72,9 @@ class FakeOps:
         self.recorded_mode = "auto"
         self.session_polls = 0
         self.worktree_error = None
+        self.git_list = adapters.CommandResult(True, 0, "", "")
+        self.git_status = adapters.CommandResult(True, 0, "", "")
+        self.workspaces = []
         self.pending_path = None
         self.delay_path = False
         records = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines()]
@@ -96,6 +99,10 @@ class FakeOps:
 
     def git(self, *args, **kwargs):
         self.calls.append(("git", args, kwargs))
+        if args == ("worktree", "list", "--porcelain"):
+            return self.git_list
+        if args == ("status", "--porcelain"):
+            return self.git_status
         if args[:2] == ("worktree", "add"):
             Path(args[4]).mkdir()
         return success()
@@ -123,6 +130,8 @@ class FakeOps:
                 "workspace": {"workspace_id": "fallback-workspace"},
                 "root_pane": {"pane_id": "fallback-pane"},
             }})
+        if args == ("workspace", "list"):
+            return success({"result": {"workspaces": self.workspaces}})
         if args[:2] == ("agent", "start"):
             if re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", args[2]) is None:
                 return failure("invalid_agent_name")
@@ -225,6 +234,156 @@ class StartTests(unittest.TestCase):
 
     def workers(self):
         return list(registry.load()["workers"].values())
+
+    def unstarted_worker(self, number=1930):
+        self.ops.issue(number)
+        with mock.patch.object(start, "_run_worker", side_effect=lambda worker, ops: worker):
+            return start.start_issues(self.repo, [number], ops=self.ops)[0]
+
+    def test_adopts_own_clean_unrecorded_worktree(self):
+        worker = self.unstarted_worker()
+        path = Path(worker["worktree_path"])
+        path.mkdir()
+        listed_path = str(path).swapcase().replace("\\", "/") if os.name == "nt" else str(path)
+        self.ops.git_list = adapters.CommandResult(True, 0,
+            f"worktree {self.repo}\nbranch refs/heads/main\n\n"
+            f"worktree {listed_path}\nHEAD abc\nbranch refs/heads/issue/1930\n\n", "")
+        self.ops.calls.clear()
+
+        adopted = start._create_worktree(worker, self.ops)
+
+        self.assertTrue(adopted["worktree_created"])
+        self.assertEqual(adopted["phase"], "worktree")
+        self.assertEqual(adopted["workspace_id"], "fallback-workspace")
+        self.assertEqual(adopted["pane_id"], "fallback-pane")
+        self.assertEqual(self.workers()[0], adopted)
+        self.assertEqual([(kind, args) for kind, args, _ in self.ops.calls], [
+            ("git", ("worktree", "list", "--porcelain")),
+            ("git", ("status", "--porcelain")),
+            ("herdr", ("workspace", "list")),
+            ("herdr", ("workspace", "create", "--cwd", str(path),
+                       "--label", "repo with spaces #1930", "--no-focus")),
+        ])
+        self.assertEqual(self.ops.calls[0][2]["cwd"], str(self.repo))
+        self.assertEqual(self.ops.calls[1][2]["cwd"], str(path))
+
+    def test_existing_worktree_is_refused_unless_registered_on_own_branch_and_clean(self):
+        worker = self.unstarted_worker()
+        path = Path(worker["worktree_path"])
+        path.mkdir()
+        marker = path / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        own = f"worktree {path}\nbranch refs/heads/issue/1930\n\n"
+        cases = (
+            (f"worktree {path}\nbranch refs/heads/another\n\n"
+             f"worktree {self.root / 'other'}\nbranch refs/heads/issue/1930\n\n",
+             "", "not registered on branch issue/1930"),
+            (own, " M keep.txt\n", "uncommitted changes"),
+            (f"worktree {self.repo}\nbranch refs/heads/main\n\n", "", "not a registered worktree"),
+        )
+        for listing, status, reason in cases:
+            with self.subTest(reason=reason):
+                self.ops.git_list = adapters.CommandResult(True, 0, listing, "")
+                self.ops.git_status = adapters.CommandResult(True, 0, status, "")
+                self.ops.calls.clear()
+                before = registry.load()
+                with self.assertRaises(start.StartError) as error:
+                    start._create_worktree(worker, self.ops)
+                self.assertIn(str(path), str(error.exception))
+                self.assertIn(reason, str(error.exception))
+                self.assertEqual(registry.load(), before)
+                self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+                self.assertTrue(all(kind == "git" and args in {
+                    ("worktree", "list", "--porcelain"), ("status", "--porcelain"),
+                } for kind, args, _ in self.ops.calls))
+
+    def test_adoption_refuses_an_existing_workspace_on_the_path(self):
+        worker = self.unstarted_worker()
+        path = Path(worker["worktree_path"])
+        path.mkdir()
+        self.ops.git_list = adapters.CommandResult(True, 0,
+            f"worktree {path}\nbranch refs/heads/issue/1930\n\n", "")
+        checkout = str(path).swapcase().replace("\\", "/") if os.name == "nt" else str(path)
+        self.ops.workspaces = [{"workspace_id": "occupied-workspace", "worktree": {"checkout_path": checkout}}]
+        self.ops.calls.clear()
+
+        with self.assertRaisesRegex(start.StartError, "occupied-workspace"):
+            start._create_worktree(worker, self.ops)
+
+        self.assertTrue(path.is_dir())
+        self.assertFalse(any(args[:2] in {("workspace", "create"), ("worktree", "create"), ("worktree", "remove")}
+                             for _, args, _ in self.ops.calls))
+        self.assertIsNone(self.workers()[0]["phase"])
+        # Refused before adoption is recorded, so a later cleanup never treats this tree as the worker's.
+        self.assertFalse(self.workers()[0].get("worktree_created"))
+
+    def test_absent_worktree_uses_existing_creation_path(self):
+        worker = self.unstarted_worker()
+        self.assertFalse(Path(worker["worktree_path"]).exists())
+        self.ops.calls.clear()
+
+        created = start._create_worktree(worker, self.ops)
+
+        self.assertEqual(created["phase"], "worktree")
+        self.assertTrue(created["worktree_created"])
+        self.assertEqual(created["workspace_id"], "workspace-1")
+        self.assertEqual([(kind, args[:2]) for kind, args, _ in self.ops.calls], [
+            ("git", ("fetch", "origin")), ("herdr", ("worktree", "create")),
+        ])
+
+    def test_restart_refuses_a_failed_agent_start_that_recorded_no_agent(self):
+        # A timed-out agent start can leave its agent running with no name recorded.
+        worker = self.unstarted_worker()
+        registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(
+            state="start_failed", phase="worktree", reason="agent start deadline expired"))
+        before = registry.load()
+        with mock.patch.object(start, "_run_worker") as run_worker:
+            with self.assertRaisesRegex(ValueError, "before agent start"):
+                start.restart("1930", ops=self.ops)
+        run_worker.assert_not_called()
+        self.assertEqual(registry.load(), before)
+
+    def test_restart_resumes_a_failed_start_before_any_agent_from_its_recorded_phase(self):
+        for number, phase in ((1930, None),):
+            with self.subTest(phase=phase):
+                worker = self.unstarted_worker(number)
+                path = Path(worker["worktree_path"])
+                path.mkdir()
+                self.ops.git_list = adapters.CommandResult(True, 0,
+                    f"worktree {path}\nbranch refs/heads/issue/{number}\n\n", "")
+                if phase == "worktree":
+                    worker = start._create_worktree(worker, self.ops)
+                registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(
+                    state="start_failed", reason="start died"))
+                self.assertFalse(self.workers()[-1].get("agent_name"))
+                self.ops.calls.clear()
+
+                with mock.patch.object(start, "_entry_retryable", side_effect=AssertionError("no entry to retry")), \
+                        mock.patch.object(start, "_create_worktree", wraps=start._create_worktree) as create:
+                    restarted = start.restart(str(number), ops=self.ops)
+
+                self.assertEqual(create.call_count, 1 if phase is None else 0)
+                self.assertEqual((restarted["state"], restarted["phase"]), ("running", "mode_checked"))
+                self.assertNotIn("reason", restarted)
+                self.assertTrue(restarted["worktree_created"])
+                self.assertFalse(any(args[:2] == ("worktree", "create") for _, args, _ in self.ops.calls))
+                self.assertEqual(len(self.ops.agents), number - 1929)
+                self.assertEqual(len(self.ops.prompts), number - 1929)
+
+    def test_failed_start_with_an_agent_still_requires_entry_retryability(self):
+        worker = self.unstarted_worker()
+        for phase in (None, "worktree"):
+            with self.subTest(phase=phase):
+                registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(
+                    state="start_failed", phase=phase, agent_name="existing-agent"))
+                before = registry.load()
+                with mock.patch.object(start, "_entry_retryable", return_value=False) as retryable, \
+                        mock.patch.object(start, "_run_worker") as run_worker:
+                    with self.assertRaisesRegex(ValueError, "never reached its session"):
+                        start.restart("1930", ops=self.ops)
+                retryable.assert_called_once()
+                run_worker.assert_not_called()
+                self.assertEqual(registry.load(), before)
 
     def test_windows_process_identity_checks_liveness_and_creation_time(self):
         with mock.patch.object(os, "kill", side_effect=AssertionError("not a Windows liveness probe")):
@@ -534,6 +693,20 @@ class StartTests(unittest.TestCase):
         self.assertEqual(start.parse_entry_command([], "CE entry: /ce-strategy #40 taste\n"),
                          ("ce-strategy", "#40 taste"))
 
+    def test_ce_plan_entry_from_label_or_body(self):
+        for number, (labels, body, args) in enumerate((
+            (["ce:plan"], "", ""),
+            ([], "CE entry: /ce-plan\n", ""),
+            (["ce:work"], "CE entry: /ce-plan docs/plans/x.md\n", "docs/plans/x.md"),
+        ), 21):
+            with self.subTest(labels=labels, body=body):
+                self.assertEqual(start.parse_entry_command(labels, body), ("ce-plan", args))
+                self.ops.issue(number, labels, body)
+                worker = start.start_issues(self.repo, [number], ops=self.ops)[0]
+                self.assertEqual(worker["state"], "running")
+                self.assertEqual(worker["entry_command"], "ce-plan")
+                self.assertEqual(self.ops.prompts[-1][3], f"/ce-plan {args or f'#{number}'}")
+
     def test_long_entry_sends_issue_reference_once_and_records_sent_args(self):
         args = "a" * 1300
         self.ops.issue(21, [], f"CE entry: /ce-brainstorm {args}")
@@ -590,9 +763,13 @@ class StartTests(unittest.TestCase):
     def test_parser_all_labels_body_and_default_args(self):
         for label, command in {
             "ce:work": "ce-work", "ce:debug": "ce-debug", "ce:lfg": "lfg", "ce:brainstorm": "ce-brainstorm",
+            "ce:strategy": "ce-strategy", "ce:plan": "ce-plan",
         }.items():
             with self.subTest(label=label):
                 self.assertEqual(start.parse_entry_command([label], ""), (command, ""))
+                self.assertEqual(start.parse_entry_command([], f"CE entry: /{command}"), (command, ""))
+                self.assertEqual(start.parse_entry_command([], f"CE entry: /{command} #9 task"),
+                                 (command, "#9 task"))
         self.assertEqual(start.parse_entry_command(["ce:work"], "CE entry: /ce-debug #9 flaky login"), ("ce-debug", "#9 flaky login"))
         self.assertIsNone(start.parse_entry_command([], "CE entry: /other #1"))
         self.ops.issue(7, [], "CE entry: /ce-brainstorm")
