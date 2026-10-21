@@ -1,6 +1,8 @@
 """Resolve stable coordinator lanes from herdr tabs and session-owned bindings."""
 
 from pathlib import Path
+import json
+import math
 import os
 import re
 
@@ -182,6 +184,46 @@ def _unbound_context(source):
 
 def owner_live(controller, snapshot):
     return snapshot["controller_counts"].get(controller["value"], 0) > 0
+
+
+def claude_session_names():
+    """Best-effort names from Claude's optional, concurrently written session files."""
+    latest = {}
+    try:
+        config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude"
+        for path in (Path(config_dir) / "sessions").glob("*.json"):
+            try:
+                session = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, RecursionError):
+                continue
+            if not isinstance(session, dict):
+                continue
+            session_id, name = session.get("sessionId"), session.get("name")
+            if not isinstance(session_id, str) or not isinstance(name, str):
+                continue
+            updated_at = session.get("updatedAt", 0)
+            if (not isinstance(updated_at, (int, float)) or isinstance(updated_at, bool)
+                    or (isinstance(updated_at, float) and not math.isfinite(updated_at))):
+                updated_at = 0
+            if session_id not in latest or updated_at > latest[session_id][0]:
+                latest[session_id] = (updated_at, {name})
+            elif updated_at == latest[session_id][0]:
+                latest[session_id][1].add(name)
+    except (OSError, ValueError, RuntimeError):
+        return {}
+    # Newest files that disagree leave the current name unknown, and unknown is never stale.
+    return {session_id: next(iter(names)) for session_id, (_, names) in latest.items() if len(names) == 1}
+
+
+def contact_stale(binding, names):
+    """Return a known renamed session's current name without changing its contact."""
+    contact = binding.get("contact")
+    if contact:
+        name = names.get(binding["controller"]["value"])
+        # Claude's file is untrusted input printed into tab-separated status lines.
+        if name and len(name) <= 100 and name.isprintable() and name != contact.rsplit(" [", 1)[0]:
+            return name
+    return None
 
 
 def _refuse_owner(tab_id, binding):

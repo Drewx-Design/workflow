@@ -833,6 +833,7 @@ def _handoff_ready(doc, worker):
 def handoff(name, target, *, lane="main", ops=adapters):
     """Claim a worker across its idempotent workspace rename and locked lane commit."""
     snapshot = lanes.read_snapshot(caller_pane_id=os.environ.get("HERDR_PANE_ID"), ops=ops)
+    session_names = lanes.claude_session_names()
     claim = {"owner": start._start_owner(), "target": target}
     claimed = []
     warnings = []
@@ -853,6 +854,9 @@ def handoff(name, target, *, lane="main", ops=adapters):
                 warnings.append(f"target lane {target} has no live coordinator; its unattended alert will fire")
             elif owner.get("contact"):
                 target_details["target_contact"] = owner["contact"]
+                current_name = lanes.contact_stale(owner, session_names)
+                if current_name is not None:
+                    target_details["target_contact_stale"] = current_name
         current["handoff_claim"] = claim
         claimed.append(dict(current))
 

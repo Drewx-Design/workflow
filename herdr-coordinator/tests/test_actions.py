@@ -156,7 +156,9 @@ class ActionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        environment = dict(os.environ, HERDR_COORD_HOME=str(Path(self.temp.name) / "home"))
+        self.sessions = Path(self.temp.name) / ".claude" / "sessions"
+        environment = dict(os.environ, HERDR_COORD_HOME=str(Path(self.temp.name) / "home"),
+                           CLAUDE_CONFIG_DIR=str(self.sessions.parent))
         for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
             environment.pop(key, None)
         self.env = mock.patch.dict(os.environ, environment, clear=True)
@@ -412,6 +414,33 @@ class ActionTests(unittest.TestCase):
                     self.assertNotIn("target_contact", result)
                 else:
                     self.assertEqual(result["target_contact"], contact)
+                self.assertNotIn("target_contact_stale", result)
+
+    def test_handoff_flags_only_known_renamed_target_contacts(self):
+        binding = {"lane": "seo", "label_seen": "SEO", "source": "tab label", "explicit": False,
+                   "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                   "pane_id": "target-pane", "contact": "boon-town-30 [4a7118]"}
+        snapshot = {"tab_ids": set(), "controller_counts": {"target-session": 1}}
+        self.sessions.mkdir(parents=True)
+        for name, session_id, stale in (
+            ("boon-town-a3", "target-session", True),
+            ("boon-town-30", "target-session", False),
+            ("unrelated", "unknown-session", False),
+        ):
+            with self.subTest(name=name, session_id=session_id):
+                self.prepare_handoff(lane="main")
+                registry.update(lambda doc: doc["tab_bindings"].update({"target-tab": binding}))
+                (self.sessions / "owner.json").write_text(
+                    json.dumps({"sessionId": session_id, "name": name}), encoding="utf-8")
+                with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot):
+                    result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                self.assertEqual(result["state"], "handed_off")
+                self.assertEqual(result["target_contact"], binding["contact"])
+                if stale:
+                    self.assertEqual(result["target_contact_stale"], name)
+                else:
+                    self.assertNotIn("target_contact_stale", result)
+                self.assertEqual(registry.load()["tab_bindings"]["target-tab"], binding)
 
     def test_handoff_captures_contact_at_claim_even_when_commit_reports_an_error(self):
         original_herdr = self.ops.herdr
@@ -439,11 +468,14 @@ class ActionTests(unittest.TestCase):
 
                 snapshot = {"tab_ids": {"target-tab"}, "controller_counts": {"target-session": 1}}
                 with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot), \
+                        mock.patch.object(actions.lanes, "claude_session_names",
+                                          return_value={"target-session": "renamed"}), \
                         mock.patch.object(self.ops, "herdr", side_effect=rename), \
                         mock.patch.object(registry, "save", side_effect=flaky_save):
                     result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
                 self.assertEqual(result["state"], "handed_off")
                 self.assertEqual(result["target_contact"], "norm-98 [bcefc3]")
+                self.assertEqual(result["target_contact_stale"], "renamed")
                 self.assertEqual(bool(failed), fail_after_commit)
                 self.assertEqual("warning" in result, fail_after_commit)
                 self.assertEqual(registry.load()["tab_bindings"]["target-tab"]["contact"], "herdr setup [21ec30]")
@@ -451,21 +483,35 @@ class ActionTests(unittest.TestCase):
     def test_handoff_reads_one_snapshot_before_any_registry_lock(self):
         self.prepare_handoff()
         load = registry.load
+        locked = registry.locked
         snapshots = []
+        names_read = []
 
         def read_snapshot(**kwargs):
             snapshots.append(True)
             return {"tab_ids": set(), "controller_counts": {}}
 
+        def read_names():
+            names_read.append(True)
+            return {}
+
         def read_registry():
             self.assertEqual(snapshots, [True], "handoff must snapshot before any registry read")
+            self.assertEqual(names_read, [True], "handoff must read names before any registry read")
             return load()
+
+        def registry_lock(*args, **kwargs):
+            self.assertEqual(names_read, [True], "handoff must read names before any registry lock")
+            return locked(*args, **kwargs)
 
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "caller-pane"}), \
                 mock.patch.object(actions.lanes, "read_snapshot", side_effect=read_snapshot) as read, \
-                mock.patch.object(registry, "load", side_effect=read_registry):
+                mock.patch.object(actions.lanes, "claude_session_names", side_effect=read_names) as names, \
+                mock.patch.object(registry, "load", side_effect=read_registry), \
+                mock.patch.object(registry, "locked", side_effect=registry_lock):
             result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
         read.assert_called_once_with(caller_pane_id="caller-pane", ops=self.ops)
+        names.assert_called_once_with()
         self.assertEqual(result["state"], "handed_off")
 
     def test_handoff_carries_open_question_and_relayable_token(self):

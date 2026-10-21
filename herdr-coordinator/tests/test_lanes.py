@@ -102,11 +102,13 @@ class LaneReaderTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.home = Path(temp.name) / "state"
+        self.sessions = Path(temp.name) / ".claude" / "sessions"
         environment = dict(os.environ)
         for name in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
             environment.pop(name, None)
         environment.update(HERDR_COORD_HOME=str(self.home),
-                           HERDR_COORD_REPO=str(Path(temp.name) / "boon-town"))
+                           HERDR_COORD_REPO=str(Path(temp.name) / "boon-town"),
+                           CLAUDE_CONFIG_DIR=str(self.sessions.parent))
         patch = mock.patch.dict(os.environ, environment, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
@@ -114,6 +116,74 @@ class LaneReaderTests(unittest.TestCase):
 
     def tearDown(self):
         self.assertFalse(self.home.exists(), "readers must not create coordinator state")
+
+    def test_session_names_skips_incomplete_and_malformed_files(self):
+        self.sessions.mkdir(parents=True)
+        files = ("", '{"sessionId":', "[]", "null", '{"sessionId": "missing-name"}',
+                 '{"name": "missing-id"}', '{"sessionId": 1, "name": "wrong-id-type"}',
+                 '{"sessionId": "wrong-name-type", "name": null}',
+                 '{"sessionId": "valid", "name": "boon-town-a3"}')
+        for index, content in enumerate(files):
+            (self.sessions / f"{index}.json").write_text(content, encoding="utf-8")
+        (self.sessions / "invalid-encoding.json").write_bytes(b"\xff")
+        (self.sessions / "directory.json").mkdir()
+        self.assertEqual(lanes.claude_session_names(), {"valid": "boon-town-a3"})
+
+    def test_session_names_picks_greatest_numeric_updated_at(self):
+        self.sessions.mkdir(parents=True)
+        files = (
+            {"sessionId": "duplicate", "name": "old", "updatedAt": 20},
+            {"sessionId": "duplicate", "name": "new", "updatedAt": 20.5},
+            {"sessionId": "duplicate", "name": "older", "updatedAt": 10},
+            {"sessionId": "duplicate", "name": "missing"},
+            {"sessionId": "duplicate", "name": "invalid", "updatedAt": "100"},
+            {"sessionId": "default", "name": "negative", "updatedAt": -1},
+            {"sessionId": "default", "name": "zero"},
+            {"sessionId": "tied", "name": "first", "updatedAt": 5},
+            {"sessionId": "tied", "name": "second", "updatedAt": 5},
+            {"sessionId": "agreed", "name": "same", "updatedAt": 5},
+            {"sessionId": "agreed", "name": "same", "updatedAt": 5},
+        )
+        for index, session in enumerate(files):
+            (self.sessions / f"{index}.json").write_text(json.dumps(session), encoding="utf-8")
+        self.assertEqual(lanes.claude_session_names(), {"duplicate": "new", "default": "zero", "agreed": "same"})
+
+    def test_session_names_returns_empty_for_missing_folder(self):
+        self.assertEqual(lanes.claude_session_names(), {})
+
+    def test_session_names_skips_unreadable_files(self):
+        self.sessions.mkdir(parents=True)
+        (self.sessions / "session.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError("unreadable")):
+            self.assertEqual(lanes.claude_session_names(), {})
+
+    def test_session_names_returns_empty_on_listing_error(self):
+        with mock.patch.object(Path, "glob", side_effect=OSError("unreadable folder")):
+            self.assertEqual(lanes.claude_session_names(), {})
+
+    def test_session_names_defaults_to_claude_home(self):
+        self.sessions.mkdir(parents=True)
+        (self.sessions / "session.json").write_text(
+            '{"sessionId": "session", "name": "current"}', encoding="utf-8")
+        os.environ.pop("CLAUDE_CONFIG_DIR")
+        with mock.patch.object(Path, "home", return_value=self.sessions.parent.parent):
+            self.assertEqual(lanes.claude_session_names(), {"session": "current"})
+
+    def test_contact_stale_compares_the_name_before_the_final_ref(self):
+        binding = {"controller": {"value": "session"}, "contact": "herdr [setup] [21ec30]"}
+        before = dict(binding)
+        self.assertIsNone(lanes.contact_stale(binding, {"session": "herdr [setup]"}))
+        self.assertIsNone(lanes.contact_stale(binding, {"other": "renamed"}))
+        self.assertEqual(lanes.contact_stale(binding, {"session": "renamed"}), "renamed")
+        self.assertEqual(binding, before)
+        binding.pop("contact")
+        self.assertIsNone(lanes.contact_stale(binding, {"session": "renamed"}))
+
+    def test_contact_stale_ignores_names_that_would_break_a_status_line(self):
+        binding = {"controller": {"value": "session"}, "contact": "norm-98 [bcefc3]"}
+        for name in ("a\tb", "a\nhold: x", "a b", "a\x85b", "", "x" * 101):
+            with self.subTest(name=name):
+                self.assertIsNone(lanes.contact_stale(binding, {"session": name}))
 
     def caller(self):
         pane = self.ops.pane["result"]["pane"]
@@ -321,11 +391,13 @@ class LaneTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.home = Path(temp.name) / "state"
+        self.sessions = Path(temp.name) / ".claude" / "sessions"
         values = dict(os.environ)
         for name in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
             values.pop(name, None)
         values.update({
             "HERDR_COORD_HOME": str(self.home), "HERDR_COORD_REPO": str(Path(temp.name) / "boon-town"),
+            "CLAUDE_CONFIG_DIR": str(self.sessions.parent),
         })
         environment = mock.patch.dict(os.environ, values, clear=True)
         environment.start()
@@ -883,6 +955,29 @@ class LaneTests(unittest.TestCase):
         self.assertEqual((self.home / "registry.json").read_bytes(), before)
         self.assertEqual(list(registry.load()["tab_bindings"]), ["w1:t1", "w2:t1"])
 
+    def test_status_flags_only_known_renamed_contacts_and_preserves_lane_lines(self):
+        contact = "boon-town-30 [4a7118]"
+        self.assertEqual(self.cli("lane", "contact", contact)[0], 0)
+        self.seed_binding("w2", "app", "app")
+        before = (self.home / "registry.json").read_bytes()
+        self.sessions.mkdir(parents=True)
+        (self.sessions / "contactless.json").write_text(
+            '{"sessionId": "w2:t1-session", "name": "app-renamed"}', encoding="utf-8")
+        for name, session_id, suffix in (
+            ("boon-town-a3", "w1:t1-session", "\tcontact_stale=boon-town-a3"),
+            ("boon-town-30", "w1:t1-session", ""),
+            ("unrelated", "unknown-session", ""),
+        ):
+            with self.subTest(name=name, session_id=session_id):
+                (self.sessions / "owner.json").write_text(
+                    json.dumps({"sessionId": session_id, "name": name}), encoding="utf-8")
+                code, output = self.cli("status")
+                self.assertEqual(code, 0, output)
+                self.assertIn("lane: main\tfollow=absent\tunhandled=0\towner=w1:t1"
+                              f"\tcontact={contact}{suffix}", output.splitlines())
+                self.assertIn("lane: app\tfollow=absent\tunhandled=0\towner=w2:t1", output.splitlines())
+                self.assertEqual((self.home / "registry.json").read_bytes(), before)
+
     def test_status_places_contact_before_follower_mismatch(self):
         self.assertEqual(self.cli("lane", "contact", "norm-98 [bcefc3]")[0], 0)
         registry.update(lambda doc: doc["lanes"]["main"].update(follow_lease={}))
@@ -1213,23 +1308,37 @@ class LaneTests(unittest.TestCase):
     def test_status_uses_one_ownership_snapshot_before_loading_registry(self):
         context = self.context()
         load = registry.load
+        locked = registry.locked
         snapshot = lanes.read_snapshot
         snapshots = []
+        names_read = []
 
         def read_snapshot(**kwargs):
             snapshots.append(True)
             return snapshot(**kwargs)
 
+        def read_names():
+            names_read.append(True)
+            return {}
+
         def read_registry():
             self.assertEqual(snapshots, [True], "status must snapshot before any registry read")
+            self.assertEqual(names_read, [True], "status must read names before any registry read")
             return load()
+
+        def registry_lock(*args, **kwargs):
+            self.assertEqual(names_read, [True], "status must read names before any registry lock")
+            return locked(*args, **kwargs)
 
         with mock.patch.object(lanes, "resolve_context", return_value=context), \
                 mock.patch.object(lanes, "read_snapshot", side_effect=read_snapshot) as read, \
-                mock.patch.object(registry, "load", side_effect=read_registry):
+                mock.patch.object(lanes, "claude_session_names", side_effect=read_names) as names, \
+                mock.patch.object(registry, "load", side_effect=read_registry), \
+                mock.patch.object(registry, "locked", side_effect=registry_lock):
             code, output = self.cli("status")
         self.assertEqual(code, 0, output)
         read.assert_called_once_with(caller_pane_id="w1:t1:p1")
+        names.assert_called_once_with()
 
     def test_status_flags_only_live_lease_mismatches(self):
         context = self.context()

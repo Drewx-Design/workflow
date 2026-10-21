@@ -519,6 +519,7 @@ def _coordinator_command(args):
             return watch.follow(interval=args.interval, lane=args.lane, context=args.lane_context, **options)
         if args.command == "status":
             snapshot = lanes.read_snapshot(caller_pane_id=os.environ.get("HERDR_PANE_ID"))
+            session_names = lanes.claude_session_names()
             doc = registry.load()
             repo = getattr(args, "resolved_repo", None)
             if repo is not None:
@@ -561,6 +562,9 @@ def _coordinator_command(args):
                 line = f"lane: {name}\tfollow={follower}\tunhandled={unhandled}\towner={owner[0] if owner else 'none'}"
                 if owner and owner[1].get("contact"):
                     line += f"\tcontact={owner[1]['contact']}"
+                    current_name = lanes.contact_stale(owner[1], session_names)
+                    if current_name is not None:
+                        line += f"\tcontact_stale={current_name}"
                 if follower_live:
                     mismatches = []
                     if binding is None:

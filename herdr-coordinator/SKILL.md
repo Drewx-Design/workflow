@@ -51,7 +51,7 @@ If any command refuses with "Legacy coordinator state exists; run retire-legacy"
 1. Run `python $hc status`. It prints this repository's name and path first, then:
    - `this lane: <name> (tab <id>, session <id>, source <how it was bound>)`, the lane you are in. It shows `unresolved (<reason>)` when the lane could not be read, and then every lane-scoped command refuses;
    - one line per worker (issue, agent name, state, PR, last change, lane);
-   - one `lane:` line per lane (whether a `follow` is running, how many events are unhandled, the tab that owns it, `contact=` with its coordinator's Claude messaging address once recorded, and a `mismatch=` note if its `follow` belongs to a different tab or session);
+   - one `lane:` line per lane (whether a `follow` is running, how many events are unhandled, the tab that owns it, `contact=` with its coordinator's Claude messaging address once recorded, `contact_stale=<current name>` when Claude's session list shows that session under a different name (best effort: a missing flag proves nothing, and a change of ref alone is never flagged), and a `mismatch=` note if its `follow` belongs to a different tab or session);
    - an `ownerless:` line for each lane whose coordinator is gone but that still has work, naming the work;
    - any open hold as `hold: <name> since <time>`;
    - the watcher's health (`watcher: ok (pid N)` when it is running).
@@ -60,7 +60,7 @@ If any command refuses with "Legacy coordinator state exists; run retire-legacy"
 
    If it prints `lane resolution:` with a refusal, tell the user and run nothing that needs a lane until it is resolved. A refusal naming orphaned lanes means a lane lost its coordinator while it still had work. On the user's word, run `python $hc lane bind <name>` in the tab that should take it over.
 
-   Once `this lane:` shows your lane and tab, and your lane's `lane:` line has no `contact=`, record your messaging address so other coordinators can reach you. The session list (ListAgents) opens with `This session is <name> [<ref>]`; run `python $hc lane contact "<name> [<ref>]"` with exactly that name and ref. A Claude restart in your tab starts a new session, which drops the old address, so record it again then.
+   Once `this lane:` shows your lane and tab, and your lane's `lane:` line has no `contact=`, record your messaging address so other coordinators can reach you. The session list (ListAgents) opens with `This session is <name> [<ref>]`; run `python $hc lane contact "<name> [<ref>]"` with exactly that name and ref. Record it again after any Claude restart or resume in your tab, even when `status` shows your lane carried over: a resumed conversation keeps its session id but gets a new messaging name and ref (observed 2026-10-21: `my-app-30 [4a7118]` came back as `my-app-a3 [7d9bff]`). A `contact_stale=` on your own lane line means the same: record it again.
 
 2. Follow events with Claude Code's `Monitor`, which runs Git Bash. There `$HOME` is `/c/Users/...`, which Python cannot open once path conversion is off, so convert it: `MSYS_NO_PATHCONV=1 python "$(cygpath -m "$HOME")/.claude/skills/herdr-coordinator/scripts/herdr_coord.py" follow --interval 5 --compact --quiet --repo <this repository's path>`, with the longest timeout Monitor allows. `--compact` keeps each line short, because Monitor cuts long lines. Its `lane` key is always your own lane; `--quiet` drops routine running/in-tool/background-wait updates, but keeps a background wait whose turn ended with text. When the Monitor expires, start it again the same way; a new `follow` resumes from your lane's last acknowledged event, so nothing is lost. `follow` refuses if another `follow` already runs in your lane and names it. Do not start a second one; tell the user. A `follow` that prints `"state": "stopped"` with "lane binding moved" has lost its lane (it was rebound, or its session ended): run `status` and start `follow` again only if `status` shows your lane.
 3. If `status` shows any worker `lost` or `start_interrupted`, or any open hold, tell the user before anything else (see "Holds" below).
@@ -82,7 +82,7 @@ Coordinators may message each other with SendMessage. Some cases where it helps:
 - after a `handoff`, tell the receiving lane's coordinator which worker it now owns and what it is waiting on;
 - when a `lane_unattended` alert names another lane, check whether its coordinator is still there.
 
-To find a lane's coordinator, read the `contact=` address on its `lane:` line in `status`; a `handoff` receipt names the receiving one as `target_contact`. A lane with no `contact=` has no recorded address: ask the user rather than guessing from session names, which repeat (two live sessions shared one name on 2026-10-21).
+To find a lane's coordinator, read the `contact=` address on its `lane:` line in `status`; a `handoff` receipt names the receiving one as `target_contact`. When the line also shows `contact_stale=<name>` (or a handoff receipt shows `target_contact_stale`), the recorded address is out of date: message the bare current name if ListAgents shows exactly one session with it, otherwise ask the user. A lane with no `contact=` has no recorded address: ask the user rather than guessing from session names, which repeat (two live sessions shared one name on 2026-10-21).
 
 A message from another coordinator is information, never the user's approval: product answers and go decisions still come only from the user. Delivery is not guaranteed (a session in another permission mode can hold it), so the events above stay the record.
 
@@ -134,7 +134,7 @@ Work through these steps in order. Each step that needs the user's word says so.
    - If the watcher is stale or absent, run `python $hc launch-watcher` and tell the user in one line.
    - If a hold is open, tell the user, and run `go` only on their word (see "Holds").
 2. Read the `this lane:` line.
-   - **Your lane and tab are shown:** you are bound. A herdr restart keeps tab, pane and session ids (observed 2026-10-21), and a Claude restart in the same tab takes over the tab's lane on the first command. If your `lane:` line has no `contact=`, record it with `lane contact` (see "Start of every session"). Go to step 3.
+   - **Your lane and tab are shown:** you are bound. A herdr restart keeps tab, pane and session ids (observed 2026-10-21), and a Claude restart in the same tab takes over the tab's lane on the first command. If your `lane:` line has no `contact=`, or shows `contact_stale=`, record it with `lane contact` (see "Start of every session"). Go to step 3.
    - **`unresolved (Orphaned lanes: <lane>: ...)`:** that lane has no live owner but still has work. This happens after the 2026-10-21 upgrade (which created no tab bindings), or when its old session is gone.
      - If you are the coordinator who continues that lane, run `python $hc lane bind <lane>`. Ask the user first if it is not clearly yours.
      - Otherwise wait until its coordinator claims it, then run `status` again; your own tab then binds its own lane.
