@@ -1,6 +1,7 @@
 # Registers the "herdr coordinator watchers" task: at logon, then every 10 minutes, relaunch the
 # watcher of each repository that still has live workers, behind its watcher_lost hold.
-# Nothing is sent to any worker until the user says go in that repository's coordinator.
+# Every lane sees the repository hold; one authorized go from the user clears it.
+# Nothing is sent to any worker until then.
 # Run again to update; -Remove unregisters it.
 param([switch]$Remove)
 

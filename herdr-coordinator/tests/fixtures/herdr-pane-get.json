@@ -1,0 +1,30 @@
+{
+  "id": "cli:pane:get",
+  "result": {
+    "pane": {
+      "agent": "claude",
+      "agent_session": {
+        "agent": "claude",
+        "kind": "id",
+        "source": "herdr:claude",
+        "value": "3684a3c0-8f9e-48e0-9c4f-9a5aa68d4a98"
+      },
+      "agent_status": "working",
+      "cwd": "C:\\Users\\user\\CodeProjects\\norm",
+      "focused": false,
+      "pane_id": "w2:p2V",
+      "revision": 2,
+      "scroll": {
+        "max_offset_from_bottom": 0,
+        "offset_from_bottom": 0,
+        "viewport_rows": 44
+      },
+      "tab_id": "w2:t2S",
+      "terminal_id": "term_65dccaa0ac9a2f",
+      "terminal_title": "◐ herdr setup",
+      "terminal_title_stripped": "herdr setup",
+      "workspace_id": "w2"
+    },
+    "type": "pane_info"
+  }
+}

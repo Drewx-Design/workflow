@@ -1,0 +1,80 @@
+{
+  "id": "cli:tab:list",
+  "result": {
+    "tabs": [
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "Collaborator",
+        "number": 241,
+        "pane_count": 1,
+        "tab_id": "w1:t7H",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "done",
+        "focused": false,
+        "label": "Collaborator 2",
+        "number": 206,
+        "pane_count": 1,
+        "tab_id": "w1:t6E",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "working",
+        "focused": false,
+        "label": "issue 2186",
+        "number": 291,
+        "pane_count": 1,
+        "tab_id": "w1:t93",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "worktrees 2",
+        "number": 245,
+        "pane_count": 1,
+        "tab_id": "w1:t7N",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "working",
+        "focused": true,
+        "label": "Sorter Session 2",
+        "number": 255,
+        "pane_count": 1,
+        "tab_id": "w1:t7Z",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "action minutes",
+        "number": 273,
+        "pane_count": 1,
+        "tab_id": "w1:t8H",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "product pulse",
+        "number": 276,
+        "pane_count": 1,
+        "tab_id": "w1:t8M",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "mentions",
+        "number": 281,
+        "pane_count": 1,
+        "tab_id": "w1:t8S",
+        "workspace_id": "w1"
+      }
+    ],
+    "type": "tab_list"
+  }
+}

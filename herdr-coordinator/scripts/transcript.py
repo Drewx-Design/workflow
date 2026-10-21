@@ -21,6 +21,9 @@ class Classification:
     state: str
     resets_at: float | None = None
     detail: str = ""
+    # For waiting_background: the turn's last assistant text and the record that ended the turn.
+    final_text: str | None = None
+    turn_id: str | None = None
 
 
 def find_transcript(session_id: str | None, projects_root: str | Path) -> Path | None:
@@ -79,6 +82,25 @@ def _main_records(records):
         if (isinstance(record, dict) and record.get("isSidechain", False) is False
                 and record.get("isCompactSummary") is not True):
             yield index, record
+
+
+def _final_text(records, after):
+    """The last main-thread assistant text after index `after` (the turn's latest prompt)."""
+    for index, record in reversed(list(_main_records(records))):
+        if index <= after:
+            break
+        if not _is_role(record, "assistant") or record.get("isApiErrorMessage"):
+            continue
+        content = _message(record).get("content")
+        if isinstance(content, str):
+            texts = [content]
+        else:
+            texts = [block["text"] for block in content or []
+                     if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)]
+        text = "\n".join(texts).strip()
+        if text:
+            return text
+    return None
 
 
 def _message(record: dict) -> dict:
@@ -209,6 +231,29 @@ def open_form_questions(records: list[dict]) -> list[dict]:
             elif block.get("type") == "tool_result":
                 forms.pop(block.get("tool_use_id"), None)
     return list(forms.values())[-1] if forms else []
+
+
+def dismissed_form_questions(records: list[dict]) -> list[dict]:
+    """Questions of a form the user dismissed with Esc, when the worker has not replied since.
+
+    Producer capture: tests/fixtures/dismissed-multiselect-form.jsonl (Claude Code 2.1.304): the
+    tool_result is an error and toolUseResult is a plain string ("User rejected tool use").
+    """
+    forms: dict[str, list] = {}
+    dismissed: list[dict] = []
+    for _, record in _main_records(records):
+        if _is_role(record, "assistant"):
+            dismissed = []
+        for block in _blocks(_message(record)):
+            if block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
+                tool_input = block.get("input")
+                questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+                forms[block.get("id")] = [q for q in questions if isinstance(q, dict)] if isinstance(questions, list) else []
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in forms:
+                questions = forms.pop(block["tool_use_id"])
+                if block.get("is_error") is True and not isinstance(record.get("toolUseResult"), dict):
+                    dismissed = questions
+    return dismissed
 
 
 def _drop_untaken_notices(records):
@@ -349,7 +394,12 @@ def classify(
         # Dropped notices still close the tasks they report.
         open_tasks = open_background_tasks(all_records) - set(expired_background)
         if now - last_growth_at < BACKGROUND_WAIT_TIMEOUT_SECONDS and open_tasks:
-            return Classification("waiting_background", detail="turn ended with open background work")
+            # Read the text from the same records and prompt boundary this classification used, so
+            # an untaken notice or a prompt queued behind the turn cannot hide its final question.
+            index = next(i for i, r in enumerate(records) if r is record)
+            return Classification("waiting_background", detail="turn ended with open background work",
+                                  final_text=_final_text(records, latest_prompt),
+                                  turn_id=str(record.get("uuid") or f"#{index}"))
         return Classification("turn_finished", detail=finished_detail)
     if (
         kind in ("user", "tool_result")

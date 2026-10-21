@@ -1,12 +1,16 @@
 import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "scripts"))
+for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+    __import__("os").environ.pop(key, None)  # a suite run inside herdr must not resolve a real lane
 
 import copy
+from datetime import datetime, timezone
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -15,6 +19,7 @@ import adapters
 import herdr_coord
 import registry
 import start
+from test_start import herdr_identity
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -63,6 +68,9 @@ class FakeOps:
         self.start_calls = []
         self.notifications = []
         self.verify_calls = []
+        self.workspace_labels = {}
+        self.renames = []
+        self.rename_results = {}
         self.verdict = {"state": "ended_without_proof", "pr": None, "url": None,
                         "no_ci": False, "overdue": False, "detail": "no proof", "final_message": "Please advise"}
 
@@ -79,6 +87,19 @@ class FakeOps:
 
     def herdr(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        if args[:2] in {("tab", "get"), ("pane", "get"), ("tab", "list"), ("pane", "list")}:
+            return herdr_identity(*args, **kwargs)
+        if args[:2] in {("workspace", "get"), ("workspace", "rename")}:
+            assert 0 < kwargs["timeout"] <= start.COMMAND_TIMEOUT
+            if args[1] == "get":
+                data = json.loads((FIXTURES / "herdr-workspace-get-main.json").read_text(encoding="utf-8"))
+                data["result"]["workspace"]["label"] = self.workspace_labels[args[2]]
+                return success(data)
+            self.renames.append(args)
+            result = self.rename_results.get(args[3], success())
+            if result.ok:
+                self.workspace_labels[args[2]] = args[3]
+            return result
         if args[:2] == ("notification", "show"):
             self.notifications.append(args)
             return success()
@@ -135,7 +156,10 @@ class ActionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.env = mock.patch.dict(os.environ, {"HERDR_COORD_HOME": str(Path(self.temp.name) / "home")})
+        environment = dict(os.environ, HERDR_COORD_HOME=str(Path(self.temp.name) / "home"))
+        for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+            environment.pop(key, None)
+        self.env = mock.patch.dict(os.environ, environment, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
         # Never spawn a real detached watcher from a test (test_watcher_guard covers this path).
@@ -143,6 +167,9 @@ class ActionTests(unittest.TestCase):
         no_watcher.start()
         self.addCleanup(no_watcher.stop)
         self.ops = FakeOps(Path(self.temp.name) / "projects")
+        identity = mock.patch.object(adapters, "herdr", side_effect=herdr_identity)
+        identity.start()
+        self.addCleanup(identity.stop)
         self.worker = self.add_worker()
 
     def add_worker(self, name="worker", state="running", session="session-1", issue=1):
@@ -160,6 +187,643 @@ class ActionTests(unittest.TestCase):
 
     def set_state(self, state, **fields):
         registry.update(lambda doc: doc["workers"]["worker"].update(state=state, **fields))
+
+    def test_cli_worker_commands_refuse_another_lane_without_effects(self):
+        for state, argv in (
+            ("ended_without_proof", ["relay", "worker", "answer", "--token", "worker-state"]),
+            ("running", ["nudge", "worker"]),
+            ("quota_wait", ["resume", "worker"]),
+            ("start_interrupted", ["restart", "worker"]),
+        ):
+            with self.subTest(command=argv[0]):
+                self.set_state(state, lane="seo")
+                before = registry.load()
+                with mock.patch.object(adapters, "herdr", side_effect=self.ops.herdr), \
+                        mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(herdr_coord.main(argv), 1)
+                self.assertIn("lane seo", json.loads(output.getvalue())["detail"])
+                self.assertEqual(registry.load(), before)
+                self.assertFalse(self.ops.sends)
+                self.assertFalse(self.ops.start_calls)
+
+    def test_relay_checks_lane_inside_remember_even_when_no_slot_is_free(self):
+        self.set_state("ended_without_proof")
+        registry.update(lambda doc: doc["config"].update(cap=0))
+        update = registry.update_with_events
+
+        def handoff_before_remember(fn, **kwargs):
+            if fn.__name__ == "remember":
+                update(lambda doc, events: doc["workers"]["worker"].update(lane="seo"))
+            return update(fn, **kwargs)
+
+        with mock.patch.object(registry, "update_with_events", side_effect=handoff_before_remember):
+            with self.assertRaisesRegex(actions.ActionError, "lane seo"):
+                actions.relay("worker", "answer", state_token="worker-state", lane="main", ops=self.ops)
+        worker = registry.load()["workers"]["worker"]
+        self.assertEqual(worker["state"], "ended_without_proof")
+        self.assertNotIn("relay_request", worker)
+        self.assertNotIn("pending_action_id", worker)
+        self.assertFalse(registry.load()["actions"])
+        self.assertFalse(self.ops.sends)
+
+    def test_preflight_rotation_cannot_persist_after_a_handoff(self):
+        original = self.ops.herdr
+        self.ops.write("session-2", [PROMPT])
+
+        def preflight(*args, **kwargs):
+            if args[:2] == ("agent", "get"):
+                registry.update(lambda doc: doc["workers"]["worker"].update(lane="seo"))
+                self.ops.sessions["worker"] = "session-2"
+            return original(*args, **kwargs)
+
+        with mock.patch.object(self.ops, "herdr", side_effect=preflight):
+            with self.assertRaisesRegex(actions.ActionError, "lane seo"):
+                actions.nudge("worker", lane="main", ops=self.ops)
+        self.assertEqual(registry.load()["workers"]["worker"]["session_id"], "session-1")
+        self.assertFalse(self.ops.sends)
+
+    def test_receipt_replay_cannot_persist_after_a_handoff(self):
+        self.ops.confirm = False
+        actions.nudge("worker", lane="main", ops=self.ops, action_id="n1")
+        prompt = copy.deepcopy(PROMPT)
+        prompt["message"]["content"] = actions.NUDGE_TEXT
+        self.ops.write("session-1", [prompt], append=True)
+        records_for = actions.records_for
+
+        def handoff_before_confirmation(worker, ops):
+            registry.update(lambda doc: doc["workers"]["worker"].update(lane="seo"))
+            return records_for(worker, ops)
+
+        with mock.patch.object(actions, "records_for", side_effect=handoff_before_confirmation):
+            with self.assertRaisesRegex(actions.ActionError, "lane seo"):
+                actions.nudge("worker", lane="main", ops=self.ops, action_id="n1")
+        self.assertEqual(registry.load()["actions"]["n1"]["status"], "delivery_unknown")
+        self.assertEqual(registry.load()["workers"]["worker"]["pending_action_id"], "n1")
+        self.assertEqual(len(self.ops.sends), 1)
+
+    def test_action_prepare_checks_current_lane_and_handoff_claim(self):
+        for changes, reason in (({"lane": "seo"}, "lane seo"),
+                                ({"lane": "main", "handoff_claim": {
+                                    "owner": start._start_owner(), "target": "seo"}}, "handoff")):
+            with self.subTest(changes=changes):
+                registry.update(lambda doc: doc["workers"]["worker"].update(changes))
+                with self.assertRaisesRegex(actions.ActionError, reason):
+                    actions._prepare(self.worker, "nudge", actions.NUDGE_TEXT, "n1", [], lane="main")
+                self.assertFalse(registry.load()["actions"])
+                self.assertNotIn("pending_action_id", registry.load()["workers"]["worker"])
+
+    def test_live_handoff_refuses_user_commands_but_dead_owner_does_not(self):
+        for state, command in (("ended_without_proof", "relay"), ("running", "nudge"),
+                               ("quota_wait", "resume"), ("start_interrupted", "restart")):
+            with self.subTest(command=command):
+                self.set_state(state, handoff_claim={"owner": start._start_owner(), "target": "seo"})
+                before = registry.load()
+                argv = [command, "worker"] + (["answer", "--token", "worker-state"] if command == "relay" else [])
+                with mock.patch.object(adapters, "herdr", side_effect=self.ops.herdr), \
+                        mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                    self.assertEqual(herdr_coord.main(argv), 1)
+                self.assertIn("handoff", json.loads(output.getvalue())["detail"])
+                self.assertEqual(registry.load(), before)
+        self.set_state("running", handoff_claim={"owner": {"pid": os.getpid(), "created": 0}, "target": "seo"})
+        self.assertEqual(actions.nudge("worker", lane="main", ops=self.ops)["status"], "delivered")
+
+    def test_named_lane_commands_and_lane_neutral_watcher_sends(self):
+        import watch
+
+        self.set_state("ended_without_proof", lane="seo")
+        self.assertEqual(actions.relay("worker", "answer", state_token="worker-state",
+                                       lane="seo", ops=self.ops)["status"], "delivered")
+        quota = copy.deepcopy(QUOTA)
+        quota["quotaLimits"]["resetsAt"] = 200
+        self.ops.write("session-1", [PROMPT, quota])
+        self.set_state("running", last_growth_at=0, transcript_offset=self.ops.path("session-1").stat().st_size)
+        watch.poll_once(ops=self.ops, now=100)
+        watch.poll_once(ops=self.ops, now=201)
+        self.assertEqual(self.ops.sends[-1], ("agent", "prompt", "worker", actions.RESUME_TEXT))
+        self.ops.write("session-1", [PROMPT, TOOL, RESULT])
+        self.set_state("running", last_growth_at=0, transcript_offset=self.ops.path("session-1").stat().st_size)
+        watch.poll_once(ops=self.ops, now=1201)
+        self.assertEqual(self.ops.sends[-1], ("agent", "prompt", "worker", actions.NUDGE_TEXT))
+
+    def test_go_and_config_from_named_lane_are_repository_wide(self):
+        registry.create_lane("seo")
+        registry.update(lambda doc: doc["holds"].update(watcher_lost={"ts": 1}))
+        context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1", "workspace_id": "w1",
+                   "controller": {"agent": "claude", "kind": "id", "value": "coordinator-session"},
+                   "source": "tab label"}
+        with mock.patch.object(herdr_coord.lanes, "resolve_context", return_value=context), \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(herdr_coord.main(["go"]), 0)
+            self.assertEqual(herdr_coord.main(["config", "set", "cap", "4"]), 0)
+        self.assertEqual(registry.load()["holds"], {})
+        self.assertEqual(registry.load()["config"]["cap"], 4)
+        for lane in ("main", "seo"):
+            self.assertEqual([event["kind"] for event in registry.read_events(0, lane=lane)], ["holds_cleared"])
+
+    def test_cli_action_dispatch_passes_the_resolved_lane(self):
+        context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1", "workspace_id": "w1",
+                   "controller": {"agent": "claude", "kind": "id", "value": "coordinator-session"},
+                   "source": "tab label"}
+        for command, argv, expected in (
+            ("nudge", ["nudge", "worker"], {"action_id": None}),
+            ("resume", ["resume", "worker"], {"action_id": None}),
+            ("relay", ["relay", "worker", "answer", "--token", "q1"],
+             {"state_token": "q1", "action_id": None, "dismiss_form": False}),
+        ):
+            with self.subTest(command=command), \
+                    mock.patch.object(herdr_coord.lanes, "resolve_context", return_value=context), \
+                    mock.patch.object(actions, command, return_value={}) as run, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(herdr_coord.main(argv), 0)
+                run.assert_called_once_with(*(["worker", "answer"] if command == "relay" else ["worker"]),
+                                            lane="seo", **expected)
+
+    def prepare_handoff(self, state="running", **fields):
+        for lane in ("seo", "app"):
+            registry.create_lane(lane)
+        self.set_state(state, issue=7, repo_path=str(Path(self.temp.name) / "boon-town"), **fields)
+        self.workspace_id = AGENTS["idle"]["workspace_id"]
+        self.ops.workspace_labels[self.workspace_id] = "boon-town #7"
+
+    def test_handoff_renames_refreshed_workspace_and_routes_one_event(self):
+        self.prepare_handoff()
+        result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["lane"], "seo")
+        self.assertEqual(worker["workspace_id"], self.workspace_id)
+        self.assertEqual(worker["pane_id"], AGENTS["idle"]["pane_id"])
+        self.assertNotIn("handoff_claim", worker)
+        self.assertEqual(self.ops.renames, [("workspace", "rename", self.workspace_id, "boon-town seo #7")])
+        self.assertEqual(result["to_lane"], "seo")
+        events = [e for e in registry.read_events(0, lane=None) if e["kind"] == "worker_handoff"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["lanes"], ["main", "seo"])
+        self.assertEqual(events[0]["payload"]["from_lane"], "main")
+        self.assertEqual(events[0]["payload"]["to_lane"], "seo")
+        for lane in ("main", "seo"):
+            self.assertIn(events[0], registry.read_events(0, lane=lane))
+        self.assertNotIn(events[0], registry.read_events(0, lane="app"))
+        actions.handoff("worker", "main", lane="seo", ops=self.ops)
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town #7")
+
+    def test_handoff_warns_only_when_target_has_no_live_owner(self):
+        controller = {"agent": "claude", "kind": "id", "value": "target-session"}
+        binding = {"lane": "seo", "label_seen": "SEO", "source": "tab label", "explicit": False,
+                   "controller": controller, "pane_id": "target-pane"}
+        cases = ((None, {}, False),
+                 ({"tab_ids": set(), "controller_counts": {}}, {}, True),
+                 ({"tab_ids": {"target-tab"}, "controller_counts": {}}, {"target-tab": binding}, True),
+                 ({"tab_ids": set(), "controller_counts": {"target-session": 1}},
+                  {"target-tab": binding}, False))
+        for snapshot, bindings, warning in cases:
+            with self.subTest(snapshot=snapshot, bindings=bindings):
+                self.prepare_handoff(lane="main")
+                registry.update(lambda doc: (doc["tab_bindings"].clear(), doc["tab_bindings"].update(bindings)))
+                with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot) as read:
+                    result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                read.assert_called_once_with(caller_pane_id=None, ops=self.ops)
+                self.assertEqual(result["state"], "handed_off")
+                self.assertEqual(actions.worker_named("worker")["lane"], "seo")
+                self.assertEqual("warning" in result, warning)
+                if warning:
+                    self.assertEqual(result["warning"],
+                                     "target lane seo has no live coordinator; its unattended alert will fire")
+
+    def test_handoff_returns_only_a_known_live_target_owners_contact(self):
+        binding = {"lane": "seo", "label_seen": "SEO", "source": "tab label", "explicit": False,
+                   "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                   "pane_id": "target-pane", "contact": "norm-98 [bcefc3]"}
+        live = {"tab_ids": set(), "controller_counts": {"target-session": 1}}
+        cases = ((None, {"target-tab": binding}, None),
+                 ({"tab_ids": {"target-tab"}, "controller_counts": {}}, {"target-tab": binding}, None),
+                 (live, {}, None),
+                 (live, {"target-tab": binding}, "norm-98 [bcefc3]"),
+                 (live, {"stale-tab": {**binding, "controller": {**binding["controller"], "value": "dead"}},
+                         "target-tab": {key: value for key, value in binding.items() if key != "contact"}}, None),
+                 (live, {"other-tab": {**binding, "lane": "app"}}, None))
+        for snapshot, bindings, contact in cases:
+            with self.subTest(snapshot=snapshot, bindings=bindings):
+                self.prepare_handoff(lane="main")
+                registry.update(lambda doc: (doc["tab_bindings"].clear(), doc["tab_bindings"].update(bindings)))
+                with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot):
+                    result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                self.assertEqual(result["state"], "handed_off")
+                if contact is None:
+                    self.assertNotIn("target_contact", result)
+                else:
+                    self.assertEqual(result["target_contact"], contact)
+
+    def test_handoff_captures_contact_at_claim_even_when_commit_reports_an_error(self):
+        original_herdr = self.ops.herdr
+        save = registry.save
+        for fail_after_commit in (False, True):
+            with self.subTest(fail_after_commit=fail_after_commit):
+                self.prepare_handoff(lane="main")
+                binding = {"lane": "seo", "label_seen": "SEO", "source": "tab label", "explicit": False,
+                           "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                           "pane_id": "target-pane", "contact": "norm-98 [bcefc3]"}
+                registry.update(lambda doc: doc["tab_bindings"].update({"target-tab": binding}))
+                failed = []
+
+                def rename(*args, **kwargs):
+                    if args[:2] == ("workspace", "rename"):
+                        registry.update(lambda doc: doc["tab_bindings"]["target-tab"].update(
+                            contact="herdr setup [21ec30]"))
+                    return original_herdr(*args, **kwargs)
+
+                def flaky_save(doc):
+                    if fail_after_commit and not failed and doc["workers"]["worker"].get("lane") == "seo":
+                        failed.append(True)
+                        raise PermissionError(5, "Access is denied")
+                    return save(doc)
+
+                snapshot = {"tab_ids": {"target-tab"}, "controller_counts": {"target-session": 1}}
+                with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot), \
+                        mock.patch.object(self.ops, "herdr", side_effect=rename), \
+                        mock.patch.object(registry, "save", side_effect=flaky_save):
+                    result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                self.assertEqual(result["state"], "handed_off")
+                self.assertEqual(result["target_contact"], "norm-98 [bcefc3]")
+                self.assertEqual(bool(failed), fail_after_commit)
+                self.assertEqual("warning" in result, fail_after_commit)
+                self.assertEqual(registry.load()["tab_bindings"]["target-tab"]["contact"], "herdr setup [21ec30]")
+
+    def test_handoff_reads_one_snapshot_before_any_registry_lock(self):
+        self.prepare_handoff()
+        load = registry.load
+        snapshots = []
+
+        def read_snapshot(**kwargs):
+            snapshots.append(True)
+            return {"tab_ids": set(), "controller_counts": {}}
+
+        def read_registry():
+            self.assertEqual(snapshots, [True], "handoff must snapshot before any registry read")
+            return load()
+
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "caller-pane"}), \
+                mock.patch.object(actions.lanes, "read_snapshot", side_effect=read_snapshot) as read, \
+                mock.patch.object(registry, "load", side_effect=read_registry):
+            result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        read.assert_called_once_with(caller_pane_id="caller-pane", ops=self.ops)
+        self.assertEqual(result["state"], "handed_off")
+
+    def test_handoff_carries_open_question_and_relayable_token(self):
+        self.prepare_handoff("question", question_text="Pick A or B?")
+        self.ops.statuses["worker"] = "blocked"
+        actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        event = next(e for e in registry.read_events(0, lane="seo") if e["kind"] == "worker_handoff")
+        self.assertEqual(event["payload"]["question_text"], "Pick A or B?")
+        self.assertEqual(event["payload"]["state_token"], "worker-state")
+        reply = actions.relay("worker", "1", state_token=event["payload"]["state_token"],
+                              lane="seo", ops=self.ops)
+        self.assertEqual(reply["status"], "delivered")
+
+    def test_handoff_requires_a_current_workspace_id_before_renaming(self):
+        self.prepare_handoff()
+        self.ops.workspace_labels["workspace-1"] = "Unrelated workspace using the stale id"
+        original = self.ops.herdr
+
+        def herdr(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("agent", "get"):
+                result.data["result"]["agent"].pop("workspace_id", None)
+            return result
+
+        with mock.patch.object(self.ops, "herdr", side_effect=herdr):
+            with self.assertRaisesRegex(actions.ActionError, "workspace id"):
+                actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertFalse(self.ops.renames)
+        self.assertEqual(actions.worker_named("worker")["lane"], "main")
+        self.assertNotIn("handoff_claim", actions.worker_named("worker"))
+        self.assertEqual(self.ops.workspace_labels["workspace-1"], "Unrelated workspace using the stale id")
+
+    def test_handoff_carries_current_final_message_and_token(self):
+        self.prepare_handoff("ended_without_proof", final_message="Please advise")
+        original = self.ops.herdr
+
+        def rename(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("workspace", "rename"):
+                self.set_state("ended_without_proof", final_message="New final message", state_token="latest")
+            return result
+
+        with mock.patch.object(self.ops, "herdr", side_effect=rename):
+            actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        event = next(e for e in registry.read_events(0, lane="seo") if e["kind"] == "worker_handoff")
+        self.assertEqual(event["payload"]["final_message"], "New final message")
+        self.assertEqual(event["payload"]["state_token"], "latest")
+
+    def test_handoff_crash_after_rename_is_repaired_without_another_rename(self):
+        self.prepare_handoff()
+        update = registry.update_with_events
+
+        def crash(fn, **kwargs):
+            if fn.__name__ == "commit_handoff":
+                raise KeyboardInterrupt("process died before commit")
+            return update(fn, **kwargs)
+
+        dead_owner = {"pid": os.getpid(), "created": 0}
+        with mock.patch.object(start, "_start_owner", return_value=dead_owner), \
+                mock.patch.object(registry, "update_with_events", side_effect=crash):
+            with self.assertRaisesRegex(KeyboardInterrupt, "process died"):
+                actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["lane"], "main")
+        self.assertEqual(worker["handoff_claim"]["owner"], dead_owner)
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town seo #7")
+        actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertEqual(len(self.ops.renames), 1)
+        self.assertEqual(actions.worker_named("worker")["lane"], "seo")
+        self.assertNotIn("handoff_claim", actions.worker_named("worker"))
+        self.assertEqual(len([e for e in registry.read_events(0) if e["kind"] == "worker_handoff"]), 1)
+
+    def test_handoff_live_claim_serializes_concurrent_targets(self):
+        self.prepare_handoff()
+        original = self.ops.herdr
+        renaming = threading.Event()
+        release = threading.Event()
+        errors = []
+
+        def herdr(*args, **kwargs):
+            if args[:2] == ("workspace", "rename"):
+                renaming.set()
+                if not release.wait(10):
+                    raise TimeoutError("test did not release rename")
+            return original(*args, **kwargs)
+
+        def first():
+            try:
+                actions.handoff("worker", "seo", lane="main", ops=self.ops)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with mock.patch.object(self.ops, "herdr", side_effect=herdr):
+            thread = threading.Thread(target=first, daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(renaming.wait(10))
+                with self.assertRaisesRegex(actions.ActionError, "handoff.*seo.*progress"):
+                    actions.handoff("worker", "app", lane="main", ops=self.ops)
+            finally:
+                release.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(actions.worker_named("worker")["lane"], "seo")
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town seo #7")
+        self.assertEqual(len(self.ops.renames), 1)
+
+    def test_handoff_commit_rechecks_guards_and_rolls_label_back(self):
+        for changes, reason in (({"pending_action_id": "late"}, "delivery.*unknown"),
+                                ({"action_id": "late"}, "delivery.*unknown"),
+                                ({"state": "starting", "start_owner": start._start_owner()}, "start"),
+                                ({"state": "starting", "phase": "command_sent", "start_owner": start._start_owner()}, "start"),
+                                ({"relay_request": {"text": "late relay"}}, "relay"),
+                                ({"state": "cleaning"}, "clean"),
+                                ({"state": "cleaned"}, "clean"),
+                                ({"lane": "app"}, "lane app")):
+            with self.subTest(changes=changes):
+                self.prepare_handoff(lane="main", pending_action_id=None, action_id=None,
+                                     relay_request=None, start_owner=None, phase="mode_checked")
+                registry.update(lambda doc: doc["actions"].update(late={"status": "delivery_unknown"}))
+                original = self.ops.herdr
+
+                def rename(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    if args[:2] == ("workspace", "rename") and args[3] == "boon-town seo #7":
+                        registry.update(lambda doc: doc["workers"]["worker"].update(changes))
+                    return result
+
+                with mock.patch.object(self.ops, "herdr", side_effect=rename):
+                    with self.assertRaisesRegex(actions.ActionError, reason):
+                        actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town #7")
+                self.assertNotIn("handoff_claim", actions.worker_named("worker"))
+                self.assertFalse([e for e in registry.read_events(0, lane=None) if e["kind"] == "worker_handoff"])
+
+    def test_handoff_rollback_failure_reports_both_labels_and_clears_claim(self):
+        self.prepare_handoff()
+        original = self.ops.herdr
+
+        def rename(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("workspace", "rename") and args[3] == "boon-town seo #7":
+                self.set_state("running", relay_request={"text": "late relay"})
+            return result
+
+        self.ops.rename_results["boon-town #7"] = adapters.CommandResult(
+            False, 1, "", "", error_code="rename_failed", error_message="workspace busy")
+        with mock.patch.object(self.ops, "herdr", side_effect=rename):
+            with self.assertRaises(actions.ActionError) as refused:
+                actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        for text in ("relay", "boon-town #7", "boon-town seo #7", "workspace busy"):
+            self.assertIn(text, str(refused.exception))
+        self.assertEqual(actions.worker_named("worker")["lane"], "main")
+        self.assertNotIn("handoff_claim", actions.worker_named("worker"))
+
+    def test_handoff_rename_failure_leaves_source_lane_and_names_reason(self):
+        self.prepare_handoff()
+        self.ops.rename_results["boon-town seo #7"] = adapters.CommandResult(
+            False, 1, "", "", error_code="rename_failed", error_message="workspace busy")
+        with self.assertRaisesRegex(actions.ActionError, "workspace busy"):
+            actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertEqual(actions.worker_named("worker")["lane"], "main")
+        self.assertNotIn("handoff_claim", actions.worker_named("worker"))
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town #7")
+        self.assertFalse([e for e in registry.read_events(0) if e["kind"] == "worker_handoff"])
+
+    def test_handoff_rename_action_error_restores_label_and_releases_claim(self):
+        self.prepare_handoff()
+        original = self.ops.herdr
+
+        def rename(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("workspace", "rename") and args[3] == "boon-town seo #7":
+                raise actions.ActionError("rename reply lost after applying")
+            return result
+
+        with mock.patch.object(self.ops, "herdr", side_effect=rename):
+            with self.assertRaisesRegex(actions.ActionError, "rename reply lost"):
+                actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertNotIn("handoff_claim", actions.worker_named("worker"))
+        self.assertEqual(actions.worker_named("worker")["lane"], "main")
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], "boon-town #7")
+        self.assertFalse([e for e in registry.read_events(0) if e["kind"] == "worker_handoff"])
+
+    def test_handoff_during_prepared_entry_refuses_without_cross_lane_send(self):
+        self.prepare_handoff("starting", phase="agent_started", start_owner=start._start_owner())
+        append = registry.append_event
+        attempted = []
+        sends = []
+
+        def interleave(kind, payload, **kwargs):
+            result = append(kind, payload, **kwargs)
+            if kind == "entry_action_recorded":
+                attempted.append(True)
+                with self.assertRaisesRegex(actions.ActionError, "start|delivery.*unknown"):
+                    actions.handoff("worker", "seo", lane="main", ops=self.ops)
+            return result
+
+        def send(worker, action, ops):
+            sends.append(actions.worker_named("worker")["lane"])
+
+        with mock.patch.object(registry, "append_event", side_effect=interleave), \
+                mock.patch.object(start, "_prompt_entry", side_effect=send):
+            start._send_entry(actions.worker_named("worker"), self.ops)
+        self.assertEqual(attempted, [True])
+        self.assertEqual(sends, ["main"])
+        self.assertFalse(self.ops.renames)
+
+    def test_handoff_refuses_live_unfinished_start_and_unknown_entry(self):
+        owner = start._start_owner()
+        for fields, reason in (({"state": "starting", "start_owner": owner}, "start"),
+                               ({"state": "starting", "phase": "command_sent", "start_owner": owner}, "start"),
+                               ({"action_id": "entry"}, "delivery.*unknown")):
+            with self.subTest(fields=fields):
+                self.prepare_handoff(lane="main", start_owner=None, action_id=None, phase="mode_checked")
+                self.ops.calls.clear()
+                registry.update(lambda doc: doc["actions"].update(entry={"status": "delivery_unknown"}))
+                registry.update(lambda doc: doc["workers"]["worker"].update(fields))
+                before = registry.load()
+                with self.assertRaisesRegex(actions.ActionError, reason):
+                    actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                self.assertEqual(registry.load(), before)
+                self.assertTrue(all(call[0][:2] in {("tab", "list"), ("pane", "list")}
+                                    for call in self.ops.calls))
+
+    def test_handoff_allows_an_unfinished_start_with_a_dead_owner(self):
+        self.prepare_handoff("start_interrupted", phase="worktree", start_owner={"pid": 42, "created": 1})
+        with mock.patch.object(start, "_process_identity", return_value=None), \
+                mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 2}):
+            self.assertEqual(actions.handoff("worker", "seo", lane="main", ops=self.ops)["state"], "handed_off")
+
+    def test_handoff_allows_a_failed_start_owned_by_the_live_watcher(self):
+        # Delta review, 2026-10-20: the watcher runs queued starts and stays alive, so a failed
+        # start's start_owner stays live; only a start still in progress blocks a handoff.
+        watcher = start._process_identity(os.getpid())
+        self.prepare_handoff("start_failed", phase="worktree", start_owner=watcher, action_id=None)
+        self.assertEqual(actions.handoff("worker", "seo", lane="main", ops=self.ops)["state"], "handed_off")
+
+    def test_handoff_committed_before_a_registry_error_keeps_the_target_label(self):
+        # Delta review, 2026-10-20: the commit is journaled before the registry replace, so a
+        # failure after that point is still a committed handoff; renaming back would leave the
+        # workspace labelled for the lane it no longer belongs to.
+        self.prepare_handoff()
+        save = registry.save
+        failed = []
+
+        def flaky(doc):
+            if not failed and doc["workers"]["worker"].get("lane") == "seo":
+                failed.append(True)
+                raise PermissionError(5, "Access is denied")
+            return save(doc)
+
+        with mock.patch.object(registry, "save", side_effect=flaky):
+            result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertTrue(failed)
+        self.assertEqual(result["state"], "handed_off")
+        worker = actions.worker_named("worker")
+        self.assertEqual((worker["lane"], worker.get("handoff_claim")), ("seo", None))
+        self.assertEqual(self.ops.workspace_labels[self.workspace_id], result["workspace_label"])
+        self.assertEqual(result["warning"],
+                         f"{PermissionError(5, 'Access is denied')}; "
+                         "target lane seo has no live coordinator; its unattended alert will fire")
+
+    def test_delivered_question_relay_keeps_receipt_and_allows_handoff(self):
+        self.prepare_handoff("question")
+        self.ops.statuses["worker"] = "blocked"
+        result = actions.relay("worker", "1", state_token="worker-state", lane="main", ops=self.ops)
+        self.assertEqual(result["status"], "delivered")
+        receipt = actions.worker_named("worker")["relay_request"]
+        actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        self.assertEqual(actions.worker_named("worker")["relay_request"], receipt)
+        self.assertEqual(actions.relay("worker", "1", state_token="worker-state", lane="seo", ops=self.ops), result)
+        self.assertEqual(len(self.ops.sends), 2)
+
+    def test_handoff_refuses_only_unsettled_relay_receipts(self):
+        for status in ("delivery_unknown", "pending", "delivered", "confirmed", "failed", "superseded"):
+            with self.subTest(status=status):
+                self.prepare_handoff(lane="main", relay_request={"action_id": "relay"})
+                registry.update(lambda doc: doc["actions"].update(relay={"status": status}))
+                if status in {"delivery_unknown", "pending"}:
+                    before = registry.load()
+                    with self.assertRaisesRegex(actions.ActionError, "relay"):
+                        actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                    self.assertEqual(registry.load(), before)
+                else:
+                    actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                    self.assertEqual(actions.worker_named("worker")["relay_request"], {"action_id": "relay"})
+
+    def test_handoff_running_to_in_tool_does_not_require_old_token(self):
+        self.prepare_handoff()
+        original = self.ops.herdr
+
+        def rename(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("workspace", "rename"):
+                actions.change_worker("worker", "in_tool")
+            return result
+
+        with mock.patch.object(self.ops, "herdr", side_effect=rename):
+            actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        worker = actions.worker_named("worker")
+        self.assertEqual((worker["state"], worker["lane"]), ("in_tool", "seo"))
+        self.assertNotEqual(worker["state_token"], "worker-state")
+        event = next(e for e in registry.read_events(0, lane="seo") if e["kind"] == "worker_handoff")
+        self.assertEqual(event["payload"]["state_token"], worker["state_token"])
+
+    def test_handoff_refuses_cleanup_pending_action_or_relay_before_external_ops(self):
+        for fields, reason in (({"state": "cleaning"}, "clean"),
+                               ({"state": "cleaned"}, "clean"),
+                               ({"cleanup_from": {"owner": start._start_owner()}}, "clean"),
+                               ({"pending_action_id": "pending"}, "delivery.*unknown"),
+                               ({"relay_request": {"text": "queued answer"}}, "relay")):
+            with self.subTest(fields=fields):
+                self.prepare_handoff()
+                registry.update(lambda doc: doc["actions"].update(pending={"status": "delivery_unknown"}))
+                registry.update(lambda doc: doc["workers"]["worker"].update(fields))
+                before = registry.load()
+                with self.assertRaisesRegex(actions.ActionError, reason):
+                    actions.handoff("worker", "seo", lane="main", ops=self.ops)
+                self.assertEqual(registry.load(), before)
+                self.assertTrue(all(call[0][:2] in {("tab", "list"), ("pane", "list")}
+                                    for call in self.ops.calls))
+
+                def clear(doc):
+                    for key in fields:
+                        if key != "state":
+                            doc["workers"]["worker"].pop(key, None)
+
+                registry.update(clear)
+
+    def test_handoff_refuses_foreign_unknown_and_same_lane_without_mutation(self):
+        self.prepare_handoff(lane="seo")
+        for lane, target, reason in (("main", "app", "lane seo"), ("seo", "unknown", "Unknown lane"),
+                                     ("seo", "seo", "same lane")):
+            with self.subTest(lane=lane, target=target):
+                before = registry.load()
+                with self.assertRaisesRegex(actions.ActionError, reason):
+                    actions.handoff("worker", target, lane=lane, ops=self.ops)
+                self.assertEqual(registry.load(), before)
+                self.assertTrue(all(call[0][:2] in {("tab", "list"), ("pane", "list")}
+                                    for call in self.ops.calls))
+
+    def test_cli_handoff_passes_resolved_lane_and_refuses_legacy(self):
+        context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1", "workspace_id": "w1",
+                   "controller": {"agent": "claude", "kind": "id", "value": "coordinator-session"},
+                   "source": "tab label"}
+        with mock.patch.object(herdr_coord.lanes, "resolve_context", return_value=context), \
+                mock.patch.object(actions, "handoff", return_value={}) as run, \
+                mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(herdr_coord.main(["handoff", "worker", "app"]), 0)
+            run.assert_called_once_with("worker", "app", lane="seo")
+        before = registry.load()
+        with mock.patch.object(adapters, "herdr", side_effect=AssertionError("no external operations")), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(herdr_coord.main(["handoff", "worker", "app", "--legacy"]), 1)
+        self.assertIn("--legacy", json.loads(output.getvalue())["detail"])
+        self.assertEqual(registry.load(), before)
 
     def test_agent_status_reads_producer_field_and_defaults_to_unknown(self):
         for state, agent in AGENTS.items():
@@ -226,7 +890,7 @@ class ActionTests(unittest.TestCase):
             ("1", [("agent", "send-keys", "worker", "1"),
                    ("agent", "send-keys", "worker", "enter")]),
             ("The user's exact words", [("agent", "send-keys", "worker", "3"),
-                                    ("pane", "send-text", "pane-1", "The user's exact words"),
+                                    ("pane", "send-text", AGENTS["blocked"]["pane_id"], "The user's exact words"),
                                     ("agent", "send-keys", "worker", "enter")]),
         ]:
             with self.subTest(text=text):
@@ -238,6 +902,25 @@ class ActionTests(unittest.TestCase):
                 self.assertEqual(result["status"], "delivered")
                 self.assertEqual(self.ops.sends[before:], expected)
                 self.assertEqual(registry.load()["workers"]["worker"]["state"], "running")
+
+    def test_first_free_text_relay_uses_refreshed_pane(self):
+        self.set_state("question")
+        self.ops.statuses["worker"] = "blocked"
+        self.ops.form_text = "The user's first answer"
+        pane = AGENTS["blocked"]["pane_id"]
+        self.assertNotEqual(actions.worker_named("worker")["pane_id"], pane)
+        original = self.ops.herdr
+
+        def herdr(*args, **kwargs):
+            if args[:2] == ("pane", "send-text"):
+                self.assertEqual(args[2], pane, "send targeted a stale pane")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(self.ops, "herdr", side_effect=herdr):
+            result = actions.relay("worker", self.ops.form_text, state_token="worker-state", ops=self.ops)
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(self.ops.sends[1], ("pane", "send-text", pane, self.ops.form_text))
+        self.assertEqual(actions.worker_named("worker")["pane_id"], pane)
 
     def test_free_text_uses_the_live_form_below_an_older_menu(self):
         # Hand-written screen: an earlier answered menu above the live form.
@@ -289,7 +972,7 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(first["status"], "failed")
         self.assertEqual(first["reason"], "invalid_key: unsupported key words")
         self.assertEqual(first["steps_sent"], ["3"])
-        self.assertEqual(first["last_send"], ["pane", "send-text", "pane-1", "words"])
+        self.assertEqual(first["last_send"], ["pane", "send-text", AGENTS["blocked"]["pane_id"], "words"])
         self.assertNotIn("pending_action_id", registry.load()["workers"]["worker"])
         events = [e for e in registry.read_events(0) if e["kind"] == "delivery_failed"]
         self.assertEqual(len(events), 1)
@@ -303,7 +986,7 @@ class ActionTests(unittest.TestCase):
         self.assertIn("check the pane", payload["detail"])
         self.assertFalse(any(e["kind"] == "delivery_unknown" for e in registry.read_events(0)))
         self.assertEqual(self.ops.sends, [("agent", "send-keys", "worker", "3"),
-                                          ("pane", "send-text", "pane-1", "words")])
+                                         ("pane", "send-text", AGENTS["blocked"]["pane_id"], "words")])
         self.ops.send_results.clear()
         # Neither replay nor reconciliation retries the failed action.
         self.assertEqual(actions.relay("worker", "words", state_token="q1", ops=self.ops)["status"], "failed")
@@ -386,6 +1069,59 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(registry.load()["actions"]["earlier"]["status"], "delivered")
         self.assertTrue(self.ops.sends)
 
+    def test_a_relay_typed_behind_an_unsent_draft_is_confirmed(self):
+        # boon-town #2458, 2026-10-20: The user's unsent draft went out ahead of the typed relay, so the
+        # prompt was draft + relay and the relay stayed delivery_unknown, refusing every later one.
+        text = "yes add the policy change label and all the worker to commit those 2 files"
+        action = {"transcript_position": 0, "text": text, "transport": "prompt"}
+
+        def prompt(content):
+            record = copy.deepcopy(PROMPT)
+            record["message"]["content"] = content
+            return record
+
+        cases = (
+            ("draft then relay (live #2458)", "add the policy label and allow the commit" + text, True),
+            ("relay alone", text, True),
+            ("trailing newline", text + "\n", True),
+            ("relay quoted mid-prompt", f"Earlier you said '{text}', but wait", False),
+            ("a different prompt", "something else entirely", False),
+            ("a tool result ending with it", [{"type": "tool_result", "tool_use_id": "t", "content": text}], False),
+            ("a system-written record ending with it", "<local-command-stdout>" + text, False),
+        )
+        for name, content, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(actions._confirmed(action, [prompt(content)]), expected)
+        # relay() refuses only empty text, so a blank relay must not match every prompt's end.
+        self.assertFalse(actions._confirmed(dict(action, text="  "), [prompt("anything at all")]))
+        # A short answer's ending identifies nothing: "yes" ends "...my eyes", "1" ends "issue 241".
+        for short, content in (("yes", "rest my eyes"), ("1", "Investigate issue 241"), ("go", "long ago")):
+            with self.subTest(short=short):
+                self.assertFalse(actions._confirmed(dict(action, text=short), [prompt(content)]))
+                self.assertTrue(actions._confirmed(dict(action, text=short), [prompt(short)]))
+        # ...unless the prompt was written within seconds of the send (live #2458: 0.6 s).
+        sent = datetime(2026, 10, 20, 13, 19, 5, tzinfo=timezone.utc).timestamp()
+        short = dict(action, text="go ahead", created_at=sent)
+        for delay, expected in ((0.6, True), (29, True), (31, False), (-5, False)):
+            with self.subTest(delay=delay):
+                record = prompt("draft textgo ahead")
+                record["timestamp"] = datetime.fromtimestamp(sent + delay, timezone.utc).isoformat().replace("+00:00", "Z")
+                self.assertEqual(actions._confirmed(short, [record]), expected)
+        self.assertFalse(actions._confirmed(dict(short, created_at=None), [prompt("draftgo ahead")]))
+        # A prompt queued while the worker was busy is an attachment; it is the send's own prompt.
+        def queued(text):
+            return {"type": "attachment", "isSidechain": False,
+                    "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": text}}
+        self.assertTrue(actions._confirmed(action, [queued("draft" + text)]))
+        self.assertTrue(actions._confirmed(action, [queued(text)]))
+        self.assertFalse(actions._confirmed(action, [queued("something else"), prompt("Never mind; " + text)]))
+        # Only the prompt the send produced carries the draft; the user's later prompt is their own.
+        own = prompt("Never mind; " + text)
+        self.assertFalse(actions._confirmed(action, [prompt("something else first"), own]))
+        # A command expansion or background notice before it does not use up the first prompt.
+        meta = dict(prompt("Base directory for this skill: ..."), isMeta=True)
+        self.assertTrue(actions._confirmed(action, [meta, prompt("draft" + text)]))
+
     def test_textless_unknown_action_is_refused_without_a_crash(self):
         self.set_state("question", state_token="q1")
         self.ops.statuses["worker"] = "blocked"
@@ -459,7 +1195,7 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(registry.load()["actions"]["legacy"]["status"], "failed")
         self.assertEqual(len(self.ops.notifications), 1)
         notification = self.ops.notifications[0]
-        self.assertEqual(notification[2], f"{watch.repo_root.display_name(self.temp.name)} #1: Worker delivery failed")
+        self.assertEqual(notification[2], f"main: {watch.repo_root.display_name(self.temp.name)} #1: Worker delivery failed")
         self.assertIn(reason, notification[4])
         self.assertIn("check the pane", notification[4])
         watch.poll_once(ops=self.ops, now=101)
@@ -528,12 +1264,12 @@ class ActionTests(unittest.TestCase):
         seq = registry.append_event("worker_state", {"state": "ended_without_proof"})
         first = actions.relay("worker", "Please use A", state_token="turn-1", ops=self.ops)
         self.assertEqual(first["status"], "delivered")
-        self.assertIn(seq, [event["seq"] for event in registry.read_events(registry.load()["ack_seq"])])
+        self.assertIn(seq, [event["seq"] for event in registry.read_events(registry.load()["lanes"]["main"]["ack_seq"])])
         replay = actions.relay("worker", "Please use A", state_token="turn-1", ops=self.ops, action_id=first["id"])
         self.assertEqual(replay["id"], first["id"])
         self.assertEqual(len(self.ops.sends), 1)
         registry.ack(seq)
-        self.assertNotIn(seq, [event["seq"] for event in registry.read_events(registry.load()["ack_seq"])])
+        self.assertNotIn(seq, [event["seq"] for event in registry.read_events(registry.load()["lanes"]["main"]["ack_seq"])])
 
     def test_relay_replay_after_next_question_is_stale_without_sending(self):
         first_question = actions.change_worker("worker", "question", question_text="Q1")
@@ -546,7 +1282,7 @@ class ActionTests(unittest.TestCase):
         second_question = actions.change_worker("worker", "question", question_text="Q2")
         self.ops.statuses["worker"] = "blocked"
         before = list(self.ops.sends)
-        self.assertIn(question_seq, [e["seq"] for e in registry.read_events(registry.load()["ack_seq"])])
+        self.assertIn(question_seq, [e["seq"] for e in registry.read_events(registry.load()["lanes"]["main"]["ack_seq"])])
         for text in ("1", "different answer"):
             for action_id in (None, first["id"], "fresh-id"):
                 with self.subTest(text=text, action_id=action_id), self.assertRaisesRegex(actions.ActionError, "Stale relay replay"):
@@ -835,13 +1571,16 @@ class ActionTests(unittest.TestCase):
             self.assertIn("hold: herdr_lost since 123\n", output.getvalue())
             self.assertIn("hold: watcher_lost since 456\n", output.getvalue())
         with mock.patch("sys.stdout", new_callable=io.StringIO):
+            for _ in range(3):
+                registry.append_event("observed", {})
             self.assertEqual(herdr_coord.main(["ack", "3"]), 0)
-            self.assertEqual(registry.load()["ack_seq"], 3)
+            self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], 3)
             self.assertEqual(herdr_coord.main(["ack", "-1"]), 1)
             self.assertEqual(herdr_coord.main(["go"]), 0)
             with mock.patch.object(actions, "relay", return_value={"status": "delivered"}) as relay:
                 self.assertEqual(herdr_coord.main(["relay", "worker", "exact words", "--token", "q1", "--action-id", "r1"]), 0)
-                relay.assert_called_once_with("worker", "exact words", state_token="q1", action_id="r1")
+                relay.assert_called_once_with("worker", "exact words", state_token="q1", action_id="r1",
+                                              dismiss_form=False, lane="main")
 
     def test_cli_relay_requires_token(self):
         with mock.patch.object(actions, "relay", return_value={"status": "delivered"}) as relay, mock.patch("sys.stderr", new_callable=io.StringIO) as error:

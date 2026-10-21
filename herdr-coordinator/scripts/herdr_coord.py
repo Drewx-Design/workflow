@@ -13,6 +13,7 @@ import shutil
 import sys
 import time
 
+import lanes
 import registry
 import repo_root
 
@@ -67,7 +68,13 @@ def main(argv=None):
         if name == "relay":
             command.add_argument("text")
             command.add_argument("--token", required=True, help="state token of the question being answered")
+            command.add_argument("--dismiss-form", action="store_true",
+                                 help="close the open form with Esc, then send the text as a prompt "
+                                      "(for multi-select or multi-tab forms a relay cannot answer)")
         command.add_argument("--action-id", help="reuse this id when replaying the same action")
+    command = commands.add_parser("handoff", help="move a worker to another coordinator lane")
+    command.add_argument("name")
+    command.add_argument("target_lane")
     commands.add_parser("go", help="clear all worker holds on the user's go")
     commands.add_parser("revive-watchers",
                         help="at logon: relaunch each repository's watcher behind a hold, if it has live workers")
@@ -84,7 +91,13 @@ def main(argv=None):
     command = config_commands.add_parser("set", help="set a configuration value")
     command.add_argument("key")
     command.add_argument("value")
-    for command in [*commands.choices.values(), *config_commands.choices.values()]:
+    command = commands.add_parser("lane", help="manage coordinator workspace bindings")
+    lane_commands = command.add_subparsers(dest="lane_command", required=True)
+    command = lane_commands.add_parser("bind", help="bind this workspace to a named lane")
+    command.add_argument("name")
+    command = lane_commands.add_parser("contact", help="record this coordinator's messaging address")
+    command.add_argument("address")
+    for command in [*commands.choices.values(), *config_commands.choices.values(), *lane_commands.choices.values()]:
         command.add_argument("--repo", dest="repo_override", default=argparse.SUPPRESS,
                              help="repository path (defaults to the current directory)")
         command.add_argument("--legacy", action="store_true", default=argparse.SUPPRESS,
@@ -96,6 +109,8 @@ def main(argv=None):
                 raise ValueError("--legacy cannot be combined with --repo")
             if args.command == "start":
                 raise ValueError("start cannot run with --legacy; no new legacy work is allowed")
+            if args.command == "handoff":
+                raise ValueError("handoff cannot run with --legacy; legacy workers stay in the main lane")
             if not os.environ.get("HERDR_COORD_HOME"):
                 # Draining must never create legacy state that would then lock out every repository.
                 if args.command != "retire-legacy" and not (repo_root.base_root() / "registry.json").exists():
@@ -119,6 +134,21 @@ def main(argv=None):
         if not os.environ.get("HERDR_COORD_HOME") and (repo_root.base_root() / "registry.json").exists():
             raise ValueError("Legacy coordinator state exists; run retire-legacy before using repository state")
         _select_state_root(args)
+        legacy = getattr(args, "legacy", False)
+        if args.command == "lane" and args.lane_command == "bind":
+            args.lane_context = lanes.bind(args.name, legacy=legacy)
+            args.lane = args.lane_context["lane"]
+        else:
+            repo = (getattr(args, "resolved_repo", None) or os.environ.get("HERDR_COORD_REPO")
+                    or getattr(args, "repo_override", None) or getattr(args, "repo", None))
+            try:
+                args.lane_context = lanes.resolve_context(repo, legacy=legacy)
+                args.lane = args.lane_context["lane"]
+            except ValueError as exc:
+                if args.command not in {"status", "go", "config", "launch-watcher", "watch-run", "revive-watchers"}:
+                    raise
+                args.lane = None
+                args.lane_error = str(exc)
     except (OSError, ValueError) as exc:
         result = {"state": "refused", "detail": str(exc)}
         if args.command == "retire-legacy":
@@ -129,7 +159,7 @@ def main(argv=None):
         return _coordinator_command(args)
     import start
 
-    # A worker started with no watcher is never nudged, relayed or reported (boon-town #1892, 2026-10-14).
+    # A worker started with no watcher is never nudged, relayed or reported (live, 2026-10-14).
     try:
         watcher = _ensure_watcher(hold=True)
     except (OSError, TimeoutError) as exc:
@@ -142,9 +172,9 @@ def main(argv=None):
                                   "reason": "no watcher is running and none could be launched"}))
             return 1
     try:
-        summaries = start.start_issues(args.repo, args.issues)
+        summaries = start.start_issues(args.repo, args.issues, lane=args.lane)
     except Exception as exc:
-        summaries = [
+        summaries = getattr(exc, "start_summaries", None) or [
             {"issue": issue, "state": "start_failed", "reason": str(exc)}
             for issue in args.issues
         ]
@@ -332,14 +362,29 @@ def _retire_legacy(abandon):
     unacknowledged = []
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
-        if (not isinstance(doc, dict) or type(doc.get("version")) is not int or doc["version"] != 1
-                or type(doc.get("ack_seq")) is not int or doc["ack_seq"] < 0
+        if (not isinstance(doc, dict) or type(doc.get("version")) is not int or doc["version"] not in (1, 2, 3)
                 or not isinstance(doc.get("queue"), list) or not isinstance(doc.get("workers"), dict)
                 or any(not isinstance(worker, dict) or "issue" not in worker for worker in doc["queue"])
                 or any(not isinstance(worker, dict) or not isinstance(worker.get("state"), str)
                        or not isinstance(worker.get("agent_name", ""), str)
                        for worker in doc["workers"].values())):
             raise ValueError("Invalid legacy registry shape or version")
+        if doc["version"] == 1:
+            ack_seq = doc.get("ack_seq")
+        else:
+            legacy_lanes = doc.get("lanes")
+            if (not isinstance(legacy_lanes, dict) or set(legacy_lanes) != {"main"}
+                    or not isinstance(legacy_lanes["main"], dict)
+                    or (doc["version"] == 2 and
+                        (not isinstance(doc.get("workspace_bindings"), dict) or doc["workspace_bindings"]))
+                    or any(worker.get("lane") != "main"
+                           for worker in [*doc["workers"].values(), *doc["queue"]])):
+                raise ValueError("Invalid legacy lanes or workspace bindings")
+            if doc["version"] == 3 and (not isinstance(doc.get("tab_bindings"), dict) or doc["tab_bindings"]):
+                raise ValueError("Invalid legacy tab bindings")
+            ack_seq = legacy_lanes["main"].get("ack_seq")
+        if type(ack_seq) is not int or ack_seq < 0:
+            raise ValueError("Invalid legacy handled position")
         try:
             with (base / "events.jsonl").open(encoding="utf-8") as events:
                 for line in events:
@@ -347,7 +392,7 @@ def _retire_legacy(abandon):
                         event = json.loads(line)
                         if not isinstance(event, dict) or type(event.get("seq")) is not int:
                             raise ValueError("Invalid legacy event sequence")
-                        if event["seq"] > doc["ack_seq"]:
+                        if event["seq"] > ack_seq:
                             unacknowledged.append(event["seq"])
         except FileNotFoundError:
             pass
@@ -471,16 +516,70 @@ def _coordinator_command(args):
             return watch.run()
         if args.command == "follow":
             options = {key: True for key in ("compact", "quiet") if getattr(args, key)}
-            return watch.follow(interval=args.interval, **options)
+            return watch.follow(interval=args.interval, lane=args.lane, context=args.lane_context, **options)
         if args.command == "status":
+            snapshot = lanes.read_snapshot(caller_pane_id=os.environ.get("HERDR_PANE_ID"))
             doc = registry.load()
             repo = getattr(args, "resolved_repo", None)
             if repo is not None:
                 print(f"repo: {repo_root.display_name(repo)} ({repo})")
             else:
                 print(f"repo: (state root {registry._home()})")
+            if getattr(args, "lane_error", None):
+                print(f"this lane: unresolved ({args.lane_error})")
+                print(f"lane resolution: {args.lane_error}")
+            else:
+                context = args.lane_context
+                if context["controller"] is None:
+                    print(f"this lane: {args.lane} ({context['source']})")
+                else:
+                    source = context["source"]
+                    if (source in {"tab label", "recovered by label"}
+                            and lanes._slug(context["tab_label"]) != args.lane):
+                        source = f"{source} (seen as {context['tab_label']})"
+                    print(f"this lane: {args.lane} (tab {context['tab_id']}, "
+                          f"session {context['controller']['value'][:8]}, source {source})")
+            if snapshot is None:
+                print("ownership: unknown (herdr snapshot unavailable)")
+            probe_deadline = time.monotonic() + STATUS_PROBE_BUDGET
             for worker in [*doc["workers"].values(), *doc["queue"]]:
-                print(f"#{worker['issue']}\t{worker.get('agent_name') or '-'}\t{worker['state']}\tPR={worker.get('pr') or '-'}\tlast_change={worker.get('last_change', '-')}")
+                line = f"#{worker['issue']}\t{worker.get('agent_name') or '-'}\t{worker['state']}\tPR={worker.get('pr') or '-'}\tlast_change={worker.get('last_change', '-')}"
+                if worker["state"] == "start_failed" and worker.get("agent_name"):
+                    line += "\t" + _start_failed_session(worker, deadline=probe_deadline)
+                line += f"\tlane={worker.get('lane', 'main')}"
+                print(line)
+            for name, lane in sorted(doc["lanes"].items()):
+                lease = lane.get("follow_lease") or {}
+                follower_live = watch.follower_alive(name, lane.get("follow_lease"))
+                follower = "live" if follower_live else "absent"
+                unhandled = len(registry.read_events(lane["ack_seq"], lane=name))
+                bindings = [(tab_id, binding) for tab_id, binding in doc["tab_bindings"].items()
+                            if binding["lane"] == name]
+                owner = next(((tab_id, binding) for tab_id, binding in bindings
+                              if snapshot is None or lanes.owner_live(binding["controller"], snapshot)), None)
+                tab_id, binding = owner or next(iter(bindings), (None, None))
+                line = f"lane: {name}\tfollow={follower}\tunhandled={unhandled}\towner={owner[0] if owner else 'none'}"
+                if owner and owner[1].get("contact"):
+                    line += f"\tcontact={owner[1]['contact']}"
+                if follower_live:
+                    mismatches = []
+                    if binding is None:
+                        if lease.get("tab_id") is not None or lease.get("controller") is not None:
+                            mismatches.append("no tab binding")
+                    else:
+                        if lease.get("tab_id") != tab_id:
+                            mismatches.append("tab_id differs from binding")
+                        if lease.get("controller") != binding["controller"]:
+                            mismatches.append("controller differs from binding")
+                    if mismatches:
+                        line += "\tmismatch=" + "; ".join(mismatches)
+                print(line)
+                if snapshot is not None and owner is None and lane.get("bound_before"):
+                    with registry.locked():
+                        current = registry.load()
+                        pending = registry.lane_pending_work(current, name)
+                    if any(pending):
+                        print(f"ownerless: {name}\t{lanes.pending_description(current, name, pending=pending)}")
             for name, hold in doc["holds"].items():
                 print(f"hold: {name} since {hold.get('ts', '-') if isinstance(hold, dict) else '-'}")
             if not watch.watcher_alive():
@@ -490,21 +589,30 @@ def _coordinator_command(args):
             else:
                 print(f"watcher: ok (pid {watch.heartbeat_pid() or 'unknown'})")
             return 0
-        if args.command == "config":
+        if args.command == "lane":
+            context = args.lane_context
+            if args.lane_command == "contact":
+                result = lanes.record_contact(context, args.address)
+            else:
+                result = {"state": "bound", "lane": args.lane, "tab_id": context["tab_id"],
+                          "pane_id": context["pane_id"],
+                          "session": context["controller"]["value"][:8] if context["controller"] else None,
+                          "source": "explicit"}
+        elif args.command == "config":
             if args.config_command == "set":
                 value = _config_value(args.key, args.value)
                 registry.update(lambda doc: doc["config"].update({args.key: value}))
             result = registry.load()["config"]
         elif args.command == "event":
-            result = next((event for event in registry.read_events(args.seq - 1)
+            result = next((event for event in registry.read_events(args.seq - 1, lane=args.lane)
                            if event["seq"] == args.seq), None) if args.seq > 0 else None
             if result is None:
                 raise ValueError(f"No event exists with sequence {args.seq}")
         elif args.command == "ack":
             if args.seq < 0:
                 raise ValueError("sequence must be nonnegative")
-            registry.ack(args.seq)
-            result = {"ack_seq": registry.load()["ack_seq"]}
+            registry.ack(args.seq, lane=args.lane)
+            result = {"ack_seq": registry.load()["lanes"][args.lane]["ack_seq"]}
         elif args.command == "launch-watcher":
             result = watch.launch()
         elif args.command == "go":
@@ -522,13 +630,16 @@ def _coordinator_command(args):
             watcher = None if legacy else _ensure_watcher(hold=True)
             if watcher is not None:
                 print(json.dumps({"watcher": watcher}, ensure_ascii=False))
-            result = start.restart(args.name)
+            result = start.restart(args.name, lane=args.lane)
         elif args.command == "cleanup":
-            result = _cleanup(args.abandon, merged_pr=args.merged_pr)
+            result = _cleanup(args.abandon, merged_pr=args.merged_pr, lane=args.lane)
+        elif args.command == "handoff":
+            result = actions.handoff(args.name, args.target_lane, lane=args.lane)
         elif args.command == "relay":
-            result = actions.relay(args.name, args.text, state_token=args.token, action_id=args.action_id)
+            result = actions.relay(args.name, args.text, state_token=args.token, action_id=args.action_id,
+                                   dismiss_form=args.dismiss_form, lane=args.lane)
         else:
-            result = getattr(actions, args.command)(args.name, action_id=args.action_id)
+            result = getattr(actions, args.command)(args.name, action_id=args.action_id, lane=args.lane)
         print(json.dumps(result, ensure_ascii=False))
         return 1 if result.get("state") == "launch_failed" else 0
     except (actions.ActionError, start.StartError, ValueError) as exc:
@@ -536,65 +647,93 @@ def _coordinator_command(args):
         return 1
 
 
-def _cleanup(abandon=None, *, merged_pr=None, ops=None):
-    """Clean every eligible worker; finish.cleanup refuses unless merged (or abandoned) and either
-    exited or idle with a clean worktree."""
+# status stays quick when herdr is slow: short probes, and no more probing once the budget is spent.
+STATUS_PROBE_TIMEOUT = 5
+STATUS_PROBE_BUDGET = 15
+
+
+def _start_failed_session(worker, ops=None, *, deadline=None):
+    """Whether a failed start left its session open, which otherwise sits idle and unseen."""
+    import adapters
+    import finish
+
+    ops = ops or adapters
+    name = worker["agent_name"]
+    remaining = STATUS_PROBE_TIMEOUT if deadline is None else min(STATUS_PROBE_TIMEOUT, deadline - time.monotonic())
+    if remaining <= 0:
+        return "session=unknown (status time budget spent)"
+    try:
+        result = ops.herdr("agent", "get", name, timeout=remaining)
+    except (OSError, TimeoutError):
+        return "session=unknown"
+    if result.ok:
+        return f"session=OPEN (restart {name}, or cleanup --abandon {name} to close it)"
+    return "session=closed" if finish._missing(result, "agent") else "session=unknown"
+
+
+def _cleanup(abandon=None, *, merged_pr=None, lane="main", ops=None):
+    """Clean eligible workers; finish.cleanup refuses unless merged (or abandoned) and either
+    exited or idle with a clean worktree. A bare cleanup sweeps this lane's eligible workers; one that
+    names a worker (--abandon or --merged-pr) cleans only that worker, so a worker parked on
+    purpose is never swept up with it (live, 2026-10-20)."""
     import adapters
     import finish
     import registry
 
     ops = ops or adapters
+    if abandon and merged_pr:
+        raise ValueError("name one worker: use --abandon or --merged-pr, not both")
+    only = abandon or (merged_pr[0] if merged_pr else None)
+    named_worker = None
+    if only:
+        named_worker = next((w for w in registry.load()["workers"].values() if w.get("agent_name") == only), None)
+        if named_worker is None:
+            raise ValueError(f"no worker named {only}")
+        lanes.check_worker_lane(named_worker, lane)
+    number = None
     if merged_pr:
         name, number = merged_pr
         if not number.lstrip("#").isdigit():
             raise ValueError(f"PR must be a number, not {number!r}")
         number = int(number.lstrip("#"))
-        worker = next((w for w in registry.load()["workers"].values() if w.get("agent_name") == name), None)
-        if worker is None:
-            raise ValueError(f"no worker named {name}")
+        worker = named_worker
         if worker.get("state") not in finish.MERGE_MARKABLE_STATES:
             raise ValueError(f"{name} is {worker.get('state')}; only a finished or lost worker can be marked merged")
         merged, reason = finish.named_pr_merged(worker, number, ops)
         if not merged:
             raise ValueError(reason)
 
-        def mark_merged(doc):
-            current = doc["workers"][worker["worker_id"]]
-            if (current.get("state"), current.get("state_token")) != (worker.get("state"), worker.get("state_token")):
-                raise ValueError(f"{name} changed state; nothing was marked")
-            # Tied to this settle: if the worker reopens and finishes again, the mark no longer applies.
-            current.update(pr=number, merged_pr_named=True, merged_pr_token=current.get("state_token"))
-        registry.update(mark_merged)
-    if abandon:
-        def mark(doc):
-            matches = [w for w in doc["workers"].values() if w.get("agent_name") == abandon]
-            if not matches:
-                raise ValueError(f"no worker named {abandon}")
-            matches[0]["abandoned"] = True
-        registry.update(mark)
     results = []
-    for worker in registry.load()["workers"].values():
+    workers = [named_worker] if only else registry.load()["workers"].values()
+    for worker in workers:
+        if only is None and worker.get("lane", "main") != lane:
+            continue
         if worker.get("state") == "cleaned":
             continue
         if worker.get("state") == "cleaning":
             claimed_from = worker.get("cleanup_from") or {}
-            if _claim_owner_alive(claimed_from.get("owner")):
+            if lanes.claim_owner_alive(claimed_from.get("owner")):
                 results.append({"issue": worker.get("issue"), "cleaned": False,
                                 "reason": "another cleanup is in progress for this worker"})
                 continue
             # An interrupted cleanup (its process is gone): take the claim over, then carry on as
             # the state it was claimed from.
-            claim = _claim_for_cleanup(worker, takeover=True)
+            claim = _claim_for_cleanup(worker, takeover=True, lane=lane,
+                                       abandon=bool(abandon), merged_pr=number)
             worker = {**worker, "state": claimed_from.get("state"), "state_token": claimed_from.get("state_token")}
-        elif (worker.get("state") not in CLEANABLE_STATES and worker.get("abandoned") is not True
+        elif (only is None and worker.get("state") not in CLEANABLE_STATES and worker.get("abandoned") is not True
                 and not (finish.merged_pr_applies(worker) and worker.get("state") in finish.MERGE_MARKABLE_STATES)):
             continue
         else:
-            claim = _claim_for_cleanup(worker)
+            claim = _claim_for_cleanup(worker, lane=lane, abandon=bool(abandon), merged_pr=number)
         if claim is None:
             results.append({"issue": worker.get("issue"), "cleaned": False,
                             "reason": "worker changed state during cleanup; nothing was closed"})
             continue
+        # The persisted worker is `cleaning`; finish checks the state and token it was claimed from,
+        # together with any authorization just written by that same claim.
+        worker = {**registry.load()["workers"][worker["worker_id"]],
+                  "state": worker["state"], "state_token": worker.get("state_token")}
         outcome = finish.cleanup(worker, ops=ops)
         _release_cleanup_claim(worker["worker_id"], claim, cleaned=bool(outcome.get("cleaned")))
         if outcome.get("cleaned"):
@@ -603,19 +742,7 @@ def _cleanup(abandon=None, *, merged_pr=None, ops=None):
     return {"state": "cleanup", "results": results}
 
 
-def _claim_owner_alive(owner):
-    """True unless the claiming process is known to be gone (an unreadable answer counts as alive)."""
-    import start
-
-    if not isinstance(owner, dict):
-        return False
-    try:
-        return start._process_identity(owner.get("pid")) == owner
-    except OSError:
-        return True
-
-
-def _claim_for_cleanup(worker, *, takeover=False):
+def _claim_for_cleanup(worker, *, takeover=False, lane=None, abandon=False, merged_pr=None):
     """Move the worker to `cleaning` only if it is unchanged, so the watcher, a relay or a reopen
     cannot revive it while cleanup closes its window (they all require the old state token).
     Returns the claim's token, or None. A takeover re-claims a `cleaning` worker whose owner died."""
@@ -628,6 +755,7 @@ def _claim_for_cleanup(worker, *, takeover=False):
 
     def claim(doc):
         current = doc["workers"][worker["worker_id"]]
+        lanes.check_worker_lane(current, lane)
         if (current.get("state"), current.get("state_token")) != (worker.get("state"), worker.get("state_token")):
             return
         if takeover:
@@ -635,6 +763,12 @@ def _claim_for_cleanup(worker, *, takeover=False):
         else:
             current["cleanup_from"] = {"state": current["state"], "state_token": current.get("state_token"),
                                        "owner": owner}
+        if abandon:
+            current["abandoned"] = True
+        if merged_pr is not None:
+            # Tied to this settle: reopening and finishing again invalidates the mark.
+            current.update(pr=merged_pr, merged_pr_named=True,
+                           merged_pr_token=current["cleanup_from"].get("state_token"))
         current.update(state="cleaning", state_token=token, last_change=time.time())
         claimed.append(token)
 

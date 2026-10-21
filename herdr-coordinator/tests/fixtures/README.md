@@ -10,6 +10,16 @@ The U1 fixtures were captured from real producers on the user's machine (herdr 0
 | `herdr-agent-get-idle.json` | `herdr agent get` right after `agent start` | Idle worker with **no** `agent_session` yet |
 | `herdr-agent-get-after-prompt-done.json` | After the first prompt finished | `agent_session.value` present (`source: herdr:claude`), status `done` |
 | `herdr-agent-get-blocked-question.json` | While the AskUserQuestion form was on screen | Status `blocked` |
+| `herdr-workspace-get-main.json` | Read-only `herdr workspace get w1`, captured 2026-10-20 | Main workspace label at `result.workspace.label` |
+| `herdr-workspace-get-worker.json` | Read-only `herdr workspace get w23`, captured 2026-10-20 | Worker workspace label and linked worktree metadata |
+| `herdr-workspace-get-missing.json` | Read-only lookup of an unknown workspace, captured 2026-10-20 | Exit 1 with `error.code` `workspace_not_found` |
+| `herdr-workspace-list.json` | Read-only `herdr workspace list`, captured 2026-10-20, trimmed to three workspaces | Live ids at `result.workspaces[].workspace_id` |
+| `herdr-tab-get.json` | Read-only `herdr tab get w2:t2S` (herdr 0.9.4), captured 2026-10-20 | `result.tab` with `tab_id`, `workspace_id`, `label` (`herdr`) and the separate `number` (`89`) |
+| `herdr-pane-get.json` | Read-only `herdr pane get w2:p2V`, captured 2026-10-20 | `result.pane` with `tab_id`, `workspace_id`, `agent: claude` and `agent_session {agent, kind: id, source: herdr:claude, value}` |
+| `herdr-tab-list-global.json` | Read-only `herdr tab list` with no `--workspace`, captured 2026-10-20, trimmed to workspaces w1, w2, w8 | Global listing at `result.tabs[]` spanning several workspaces |
+| `herdr-pane-list-global.json` | Read-only `herdr pane list` with no `--workspace`, same capture, trimmed to the panes of those tabs | Global listing at `result.panes[]`; every Claude pane carries a distinct `agent_session.value` |
+| `herdr-tab-get-missing.json` | Read-only `herdr tab get w2:tZZZ`, captured 2026-10-20 | Exit 1, written to stderr, with `error.code` `tab_not_found` |
+| `herdr-pane-get-missing.json` | Read-only `herdr pane get w2:pZZZ`, captured 2026-10-20 | Exit 1, written to stderr, with `error.code` `pane_not_found` |
 | `herdr-agent-read-visible.txt` | Exact stdout of `herdr agent read <agent> --source visible`, herdr 0.9.0, captured 2026-10-07 | Plain pane text with internal newlines, not a JSON envelope; this capture is not a pending AskUserQuestion form |
 | `background-tasks-excerpt.jsonl` | Live Claude Code worker `taste-swipe-37`, captured 2026-10-07; tool commands, prompts, and requested model redacted | Bash `run_in_background: true` with a string tool result, Agent launch with a text-block tool result, and a main-thread `<task-notification>` with a terminal status and launching tool-use id |
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import msvcrt
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from typing import NamedTuple
 import actions
 import adapters
 import finish
+import lanes
 import registry
 import repo_root
 import start
@@ -35,6 +37,14 @@ _TRANSCRIPTS = {}
 # `cleaning`: cleanup has claimed the worker and may be closing its window; the watcher leaves it alone.
 TERMINAL_STATES = {"done", "awaiting_merge", "cleaned", "start_failed", "cleaning"}
 REOPENABLE_STATES = {"done", "awaiting_merge"}  # settled, but the user may keep using the pane
+# Past the hour-long background wait, a pane whose footer still counts running background shells
+# keeps the wait, up to this long without transcript growth.
+BACKGROUND_LIVE_MAX_SECONDS = 6 * 60 * 60
+# A dismiss-and-answer relay waits up to actions.DISMISS_TIMEOUT for the form to close, then types.
+DISMISS_SETTLE_SECONDS = 120
+# Producer captures: tests/fixtures/herdr-agent-read-visible.txt ("· 3 shells · … · ← 1 agent ·") and
+# live footers of 2026-10-19. "← 1 agent" is on every pane, idle ones included, so only shells count.
+_FOOTER_SHELLS = re.compile(r"(?:^|·\s*)(\d+)\s+shells?(?=\s*(?:·|$))")
 
 
 @contextmanager
@@ -123,6 +133,136 @@ def watcher_slow(*, now=None):
         return True
 
 
+def follower_alive(lane, lease, *, now=None):
+    if not isinstance(lease, dict) or type(lease.get("pid")) is not int or lease["pid"] <= 0:
+        return False
+    if type(lease.get("process_created")) is not int:
+        return False
+    try:
+        data = json.loads((registry._home() / f"follow-{lane}.json").read_text(encoding="utf-8"))
+        if any(data.get(key) != lease.get(key) for key in ("pid", "process_created", "tab_id", "controller")):
+            return False
+        age = (time.time() if now is None else now) - float(data["ts"])
+        if not 0 <= age < 120:
+            return False
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    try:
+        identity = start._process_identity(lease["pid"])
+    except OSError:
+        return True  # A fresh heartbeat and inaccessible process do not prove death.
+    return identity == {"pid": lease["pid"], "created": lease["process_created"]}
+
+
+def _follow_heartbeat(lane, lease, *, now):
+    registry._save_json({**lease, "ts": now}, registry._home() / f"follow-{lane}.json")
+
+
+def _main_bindings(doc):
+    return {tab_id: binding for tab_id, binding in doc["tab_bindings"].items() if binding["lane"] == "main"}
+
+
+def _follow_snapshot(lease):
+    known = _main_bindings(registry.load()) if lease.get("tab_id") is None else None
+    if known == {}:
+        return None, known  # No main owner to look up; recheck these bindings under the lock.
+    return lanes.read_snapshot(), known
+
+
+def _check_follow_binding(doc, lane, lease, snapshot, known):
+    if lease.get("tab_id") is not None:
+        binding = doc["tab_bindings"].get(lease["tab_id"])
+        if (binding is None or binding["lane"] != lane
+                or binding["controller"] != lease["controller"]):
+            raise ValueError("lane binding moved; restart follow from the owning tab")
+        return True
+    if lane != "main":
+        raise ValueError("Outside herdr, follow can only serve lane main")
+    if _main_bindings(doc) != known:
+        return False  # A new owner needs a fresh snapshot, taken after releasing the lock.
+    for tab_id, binding in doc["tab_bindings"].items():
+        if binding["lane"] != "main":
+            continue
+        if snapshot is None:
+            raise ValueError("Cannot verify main ownership: herdr snapshot is unknown")
+        if lanes.owner_live(binding["controller"], snapshot):
+            raise ValueError(f"Lane main is owned by tab {tab_id}; restart follow from the owning tab")
+    return True
+
+
+def _claim_follow(lane, *, now, context=None):
+    owner = start._start_owner()
+    lease = {"pid": owner["pid"], "process_created": owner["created"]}
+    if context is not None and context["tab_id"] is not None:
+        if context["lane"] != lane:
+            raise ValueError("lane binding moved; restart follow from the owning tab")
+        lease.update(tab_id=context["tab_id"], controller=dict(context["controller"]))
+    for _ in range(3):
+        snapshot, known = _follow_snapshot(lease) if lease.get("tab_id") is None else (None, None)
+        claimed = False
+
+        def claim(doc):
+            nonlocal claimed
+            current = doc["lanes"][lane]
+            holder = current.get("follow_lease")
+            if follower_alive(lane, holder, now=now):
+                raise ValueError(f"Lane {lane} already has follow running with pid {holder['pid']}")
+            if not _check_follow_binding(doc, lane, lease, snapshot, known):
+                return
+            # Publish the first beat inside the claim lock, before another follower can inspect it.
+            _follow_heartbeat(lane, lease, now=now)
+            current.update(follow_lease=lease, unattended_since=None, last_alert_at=None)
+            claimed = True
+
+        registry.update(claim)
+        if claimed:
+            return lease
+    raise ValueError("Main lane bindings changed during herdr snapshot; retry follow")
+
+
+def _refresh_follow(lane, lease, *, now):
+    for _ in range(3):
+        snapshot, known = _follow_snapshot(lease)
+        error = None
+        retry = False
+
+        def refresh(doc):
+            nonlocal error, retry
+            current = doc["lanes"][lane]
+            if current.get("follow_lease") != lease:
+                return
+            try:
+                if not _check_follow_binding(doc, lane, lease, snapshot, known):
+                    retry = True
+                    return
+                if (lease.get("controller") is not None and snapshot is not None
+                        and not lanes.owner_live(lease["controller"], snapshot)):
+                    raise ValueError("controller absent; lane binding moved; restart follow from the owning tab")
+            except ValueError as exc:
+                current["follow_lease"] = None
+                error = exc
+                return
+            _follow_heartbeat(lane, lease, now=now)
+
+        # Serialize the heartbeat and any release with takeover and binding changes.
+        doc = registry.update(refresh)
+        if retry:
+            continue
+        if error is not None:
+            raise error
+        return doc["lanes"][lane].get("follow_lease") == lease
+    _release_follow(lane, lease)
+    raise ValueError("Main lane bindings changed during herdr snapshot; stopping follow")
+
+
+def _release_follow(lane, lease):
+    def release(doc):
+        if doc["lanes"][lane].get("follow_lease") == lease:
+            doc["lanes"][lane]["follow_lease"] = None
+
+    registry.update(release)
+
+
 def launch():
     if lock_held():
         return {"state": "already_running"}
@@ -168,12 +308,18 @@ def _read(worker, ops, now):
                 records.extend(new_records)
     growth = new_offset != offset
     _TRANSCRIPTS[key] = _TranscriptCache(str(path), records, new_offset)
+    # Record a move on to build as soon as it is seen, with the offset that covers it: a later session
+    # change drops these records. The scan is cheap (about 2 ms for 3,000 records).
+    stage = (finish.later_stage(records) if not worker.get("advanced_stage")
+             and _entry(worker) in {"ce-brainstorm", "ce-strategy"} else None)
 
     def remember(doc):
         current = doc["workers"][worker["worker_id"]]
         if current.get("session_id") != worker.get("session_id"):
             return
         current.update(transcript_path=str(path), transcript_offset=new_offset)
+        if stage and not current.get("advanced_stage"):
+            current["advanced_stage"] = stage
         if growth or "last_growth_at" not in current:
             current["last_growth_at"] = now
 
@@ -209,6 +355,9 @@ def _notification(event, worker=None) -> tuple[str, str] | None:
         body = "Run go before resuming: " + ", ".join(payload["workers"])
     elif event["kind"] == "watcher_lost":
         title, body = "Coordinator watcher lost", "Workers are held until the user runs go."
+    elif event["kind"] == "lane_unattended":
+        title = f"Lane {payload['lane']} unattended"
+        body = f"Lane {payload['lane']} has unhandled worker events and no live follow."
     elif event["kind"] in {"watcher_exit", "watcher_slow", "watcher_hung", "technical_problem"}:
         if event["kind"] == "technical_problem" and payload.get("failed_iterations"):
             return None  # Iteration failures are logged; repeated failure has one exit notification.
@@ -252,6 +401,9 @@ def _notification(event, worker=None) -> tuple[str, str] | None:
         title = f"{prefix} #{issue}: {title}"
     elif prefix:
         title = f"{prefix}: {title}"
+    routed = registry.event_lanes(event)
+    if routed:
+        title = f"{', '.join(routed)}: {title}"
     return title, body
 
 
@@ -259,7 +411,7 @@ def _notify_events(ops):
     """Replay unnotified events after recovery, including across watcher restarts."""
     doc = registry.load()
     cursor = doc.get("notification_seq", 0)
-    for event in registry.read_events(cursor):
+    for event in registry.read_events(cursor, lane=None):
         worker = doc["workers"].get(event["payload"].get("worker_id"))
         notification = _notification(event, worker)
         if notification:
@@ -286,20 +438,81 @@ def _reopen_records(worker, records):
     return records[position:]
 
 
+def _pane_shows_background_shells(worker, ops):
+    """The pane's footer line counts background shells that are still running."""
+    try:
+        screen = actions.visible_text(worker, ops)
+    except (OSError, TimeoutError):
+        return False  # unreadable is not evidence of live work
+    lines = [line.strip() for line in screen.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return any(int(match.group(1)) > 0 for match in _FOOTER_SHELLS.finditer(lines[-1]))
+
+
+def _entry(worker):
+    return (worker.get("entry_command") or "").lstrip("/").rsplit(":", 1)[-1]
+
+
+def _latest_turn(records):
+    """Main-thread records after the latest prompt."""
+    main_records = [record for _, record in transcript._main_records(records)]
+    # The Esc marker is not a prompt; a prompt queued after it is.
+    latest_prompt = max((index for index, record in enumerate(main_records)
+                         if (transcript._is_role(record, "user")
+                             and transcript._prompt_texts(transcript._message(record))
+                             and not transcript._is_interrupt(record))
+                         or transcript._is_queued_prompt(record)), default=-1)
+    return main_records[latest_prompt + 1:]
+
+
+def _wait_background(worker, observed, now, state):
+    """Mark the worker waiting on its own background work, carrying the turn's final text.
+
+    A worker can end its turn on a question while a background shell still runs. Its final text
+    rides on the event so the coordinator can read it now rather than when the wait ends. Each new
+    turn gets a fresh state token, so an answer to an earlier question cannot be relayed into a
+    later one. A turn already published is not published again: after a relay the transcript can
+    lag the send, and re-reading the old turn must not repeat a question the user already answered.
+    """
+    turn = f"{worker.get('session_id')}:{observed.turn_id}"
+
+    def change(doc, events):
+        current = doc["workers"][worker["worker_id"]]
+        if current["state"] != state:
+            return
+        changed = current["state"] != "waiting_background"
+        if current.get("background_turn") == turn:
+            if changed:
+                current.update(state="waiting_background", last_change=now, state_token=uuid.uuid4().hex)
+                current.pop("question_text", None)
+                current.pop("final_message", None)  # answered; a later stall alert must not repeat it
+                events.append(("worker_state", dict(current)))
+            return
+        current.update(state="waiting_background", last_change=now, state_token=uuid.uuid4().hex,
+                       background_turn=turn)
+        if observed.final_text:
+            current["final_message"] = observed.final_text
+        else:
+            current.pop("final_message", None)  # an earlier turn's message is not this turn's
+        current.pop("question_text", None)
+        events.append(("worker_state", dict(current)))
+
+    registry.update_with_events(change)
+
+
 def _verify(worker, records, ops, now, *, no_closing_record=False):
+    # Read the stage from the whole session before trimming: a relay after the worker moved on to
+    # ce-work would otherwise hide that it left its brainstorm. Once seen, the registry keeps it.
+    advanced_stage = worker.get("advanced_stage") or finish.later_stage(records)
+    if advanced_stage:
+        worker = {**worker, "advanced_stage": advanced_stage}
     records = _reopen_records(worker, records)
     no_closing_record = no_closing_record or (
         worker["state"] == "awaiting_checks" and worker.get("no_closing_record", False)
     )
     if no_closing_record:
-        main_records = [record for _, record in transcript._main_records(records)]
-        # The Esc marker is not a prompt; a prompt queued after it is.
-        latest_prompt = max((index for index, record in enumerate(main_records)
-                             if (transcript._is_role(record, "user")
-                                 and transcript._prompt_texts(transcript._message(record))
-                                 and not transcript._is_interrupt(record))
-                             or transcript._is_queued_prompt(record)), default=-1)
-        records = main_records[latest_prompt + 1:]
+        records = _latest_turn(records)
     verify = getattr(ops, "verify_done", finish.verify_done)
     if verify is None:
         verify = finish.verify_done
@@ -309,8 +522,13 @@ def _verify(worker, records, ops, now, *, no_closing_record=False):
         raise ValueError(f"Unexpected completion state: {state}")
     fields = {key: value for key, value in result.items() if key != "state"}
     fields["no_closing_record"] = no_closing_record
+    if advanced_stage:
+        fields["advanced_stage"] = advanced_stage
     if state == "ended_without_proof" and no_closing_record:
-        fields["final_message"] = (
+        dismissed = transcript.dismissed_form_questions(records)
+        fields["final_message"] = "\n".join(actions.form_lines(
+            dismissed, "The worker's form was dismissed without an answer; the worker waits for input. "
+                       "It asked:")) if dismissed else (
             "Final message is missing from the transcript; read it in the worker's pane."
         )
 
@@ -566,6 +784,11 @@ def _poll_worker(worker, ops, now, keepalive=None):
         pending = actions.reconcile_action(pending_id, ops=ops, records=records)
         if pending["status"] == "delivery_unknown":
             pending = actions.settle_moot_nudge(pending_id, records)
+        if (pending["status"] == "delivery_unknown" and pending.get("transport") == "dismiss"
+                and now - pending.get("created_at", now) < DISMISS_SETTLE_SECONDS):
+            # Between its Esc and its prompt the turn reads as interrupted; judging it now would
+            # report the worker ended while the relay is still typing the answer.
+            return
         delivery_unknown = pending["status"] == "delivery_unknown"
         if delivery_unknown:
             actions.report_delivery_unknown(pending_id)
@@ -595,6 +818,12 @@ def _poll_worker(worker, ops, now, keepalive=None):
                 for _, record in transcript._main_records(_reopen_records(worker, records)))):
         actions.change_worker(worker["worker_id"], "running", now=now, expected=state)
         return
+    if (state == "waiting_background" and not growth
+            and observed.state in {"running", "stalled", "turn_finished"}
+            and now - worker.get("last_growth_at", now) >= transcript.BACKGROUND_WAIT_TIMEOUT_SECONDS
+            and now - worker.get("last_growth_at", now) < BACKGROUND_LIVE_MAX_SECONDS
+            and _pane_shows_background_shells(worker, ops)):
+        return  # a long background job (a build, a test run) is still running in the pane
     if state == "waiting_background" and not growth and observed.state in {"running", "stalled"}:
         # herdr shows a finished pane as idle once it has been viewed, which reads as running, then
         # stalled. Without growth the turn is still over: keep the background wait, then verify at
@@ -614,7 +843,7 @@ def _poll_worker(worker, ops, now, keepalive=None):
         _verify(worker, records, ops, now,
                 no_closing_record=observed.detail in (transcript.NO_CLOSING_RECORD, transcript.INTERRUPTED))
     elif observed.state == "waiting_background":
-        actions.change_worker(worker["worker_id"], "waiting_background", now=now, expected=state)
+        _wait_background(worker, observed, now, state)
     elif observed.state == "question":
         if state != "question":
             text = actions.question_text(worker, ops, records)
@@ -712,6 +941,28 @@ def _report_problem(worker, exc, *, kind="delivery_unknown"):
     registry.update_with_events(report)
 
 
+def _check_unattended(now):
+    doc = registry.load()
+    cursor = min(lane["ack_seq"] for lane in doc["lanes"].values())
+    pending = registry.read_events(cursor, lane=None)
+
+    def check(doc, events):
+        for name, lane in doc["lanes"].items():
+            unhandled = any(event["seq"] > lane["ack_seq"] and name in (registry.event_lanes(event) or ())
+                            and event["payload"].get("worker_id") for event in pending)
+            if not unhandled or follower_alive(name, lane.get("follow_lease"), now=now):
+                lane.update(unattended_since=None, last_alert_at=None)
+                continue
+            if lane.get("unattended_since") is None:
+                lane["unattended_since"] = now
+            if now - lane["unattended_since"] >= 15 * 60 and (
+                    lane.get("last_alert_at") is None or now - lane["last_alert_at"] >= 60 * 60):
+                lane["last_alert_at"] = now
+                events.append(("lane_unattended", {"lane": name, "ts": now}))
+
+    registry.update_with_events(check)
+
+
 def poll_once(*, ops=adapters, now, keepalive=None):
     before = registry.load()["event_seq"]
     try:
@@ -722,7 +973,9 @@ def poll_once(*, ops=adapters, now, keepalive=None):
         doc = registry.update(lambda doc: doc.update(herdr_failures=doc.get("herdr_failures", 0) + 1))
         if doc["herdr_failures"] >= 3:
             _herdr_lost(now)
-        return registry.read_events(before)
+        _check_unattended(now)
+        _notify_events(ops)
+        return registry.read_events(before, lane=None)
     if registry.load().get("herdr_failures"):
         registry.update(lambda doc: doc.pop("herdr_failures", None))
     for worker in list(registry.load()["workers"].values()):
@@ -741,8 +994,9 @@ def poll_once(*, ops=adapters, now, keepalive=None):
     _drain(ops, keepalive)
     if keepalive:
         keepalive()
+    _check_unattended(now)
     _notify_events(ops)
-    return registry.read_events(before)
+    return registry.read_events(before, lane=None)
 
 
 def run(*, ops=adapters, poll_seconds=15):
@@ -794,12 +1048,16 @@ def _watcher_lost(now):
     registry.update_with_events(hold)
 
 
-def _compact_line(event):
+def _compact_line(event, *, lane="main"):
     payload = event["payload"]
-    summary = {"seq": event["seq"], "kind": event["kind"]}
+    summary = {"seq": event["seq"], "kind": event["kind"], "lane": lane}
     for key in ("issue", "state", "agent_name", "worker_id", "state_token", "url", "pr", "no_ci", "overdue"):
         if key in payload:
             summary[key] = payload[key]
+    if event["kind"] == "worker_handoff":
+        summary.update(from_lane=payload["from_lane"], to_lane=payload["to_lane"], detail=True)
+    elif event["kind"] == "lane_unattended":
+        summary.update(target_lane=payload["lane"], detail=True)
     if any(key in payload for key in ("question_text", "final_message", "detail", "reason")):
         summary["detail"] = True
     line = json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
@@ -808,10 +1066,10 @@ def _compact_line(event):
     while len(line) >= 399:
         # A shortened state_token would make the coordinator's relay fail.
         candidates = [key for key, value in summary.items()
-                      if isinstance(value, str) and len(value) > 1 and key not in {"kind", "state_token"}]
+                      if isinstance(value, str) and len(value) > 1 and key not in {"kind", "state_token", "lane"}]
         if not candidates:
             # Always terminate: fall back to the minimum the coordinator needs.
-            minimal = {"seq": event["seq"], "kind": event["kind"], "detail": True}
+            minimal = {"seq": event["seq"], "kind": event["kind"], "lane": lane, "detail": True}
             return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
         key = max(candidates, key=lambda key: len(summary[key]))
         value = summary[key]
@@ -822,10 +1080,12 @@ def _compact_line(event):
     return line
 
 
-def follow(*, interval=5, compact=False, quiet=False):
+def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None):
     if interval <= 0:
         raise ValueError("interval must be positive")
-    cursor = registry.load()["ack_seq"]
+    cursor = registry.load()["lanes"][lane]["ack_seq"]
+    lease = None
+    last_beat = None
     reported_loss = False
     reported_slow = False
     reported_hung = False
@@ -833,6 +1093,24 @@ def follow(*, interval=5, compact=False, quiet=False):
         while True:
             now = time.time()
             try:
+                if lease is None:
+                    try:
+                        lease = _claim_follow(lane, now=now, context=context)
+                    except ValueError as exc:
+                        print(json.dumps({"state": "refused", "detail": str(exc)}), flush=True)
+                        return 1
+                    last_beat = now
+                elif registry.load()["lanes"][lane].get("follow_lease") != lease:
+                    return 1
+                if now - last_beat >= 30:
+                    try:
+                        refreshed = _refresh_follow(lane, lease, now=now)
+                    except ValueError as exc:
+                        print(json.dumps({"state": "stopped", "detail": str(exc)}), flush=True)
+                        return 1
+                    if not refreshed:
+                        return 1
+                    last_beat = now
                 if watcher_alive(now=now):
                     reported_loss = False
                     if watcher_slow(now=now):
@@ -857,17 +1135,23 @@ def follow(*, interval=5, compact=False, quiet=False):
                     reported_loss = True
                     reported_slow = False
                     reported_hung = False
-                cursor = max(cursor, registry.load()["ack_seq"])
-                for event in registry.read_events(cursor):
+                cursor = max(cursor, registry.load()["lanes"][lane]["ack_seq"])
+                for event in registry.read_events(cursor, lane=lane):
+                    # A background wait is routine unless the turn ended with text, which may be a question.
                     if not (quiet and event["kind"] == "worker_state"
-                            and event["payload"].get("state") in {"running", "in_tool", "waiting_background"}):
-                        print(_compact_line(event) if compact else json.dumps(event, ensure_ascii=False), flush=True)
+                            and event["payload"].get("state") in {"running", "in_tool", "waiting_background"}
+                            and not (event["payload"].get("state") == "waiting_background"
+                                     and event["payload"].get("final_message"))):
+                        print(_compact_line(event, lane=lane) if compact else json.dumps(event, ensure_ascii=False), flush=True)
                     cursor = event["seq"]
             except TimeoutError:
                 pass  # Contention delays the event or its replay until the next interval.
-            time.sleep(interval)
+            time.sleep(min(interval, 30))
     except KeyboardInterrupt:
         return 0
+    finally:
+        if lease is not None:
+            _release_follow(lane, lease)
 
 
 if __name__ == "__main__":

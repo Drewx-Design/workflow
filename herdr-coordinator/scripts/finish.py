@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 import re
 import stat
@@ -16,10 +17,13 @@ CHECKS_OVERDUE = 3600
 PR_FIELDS = "number,state,url,createdAt,mergedAt"
 # the user, 2026-10-13: cleanup may close the window of a finished worker that sits idle with a clean
 # worktree (closing the workspace ends its agent). A busy agent or a dirty tree is never closed.
-CLOSABLE_STATES = frozenset({"done", "awaiting_merge", "ended_without_proof", "quota_wait"})
+# A start_failed worker's session can outlive the failed entry, idle for days (live,
+# 2026-10-15): --abandon may close it under the same idle, clean-worktree rule.
+# Only an abandoned one: it has no PR to merge.
+CLOSABLE_STATES = frozenset({"done", "awaiting_merge", "ended_without_proof", "quota_wait", "start_failed"})
 # A lost worker's agent is gone (a reboot or herdr restart), so --merged-pr may clean it; if herdr
 # brought its agent back, _close_refusal still refuses to close it.
-MERGE_MARKABLE_STATES = CLOSABLE_STATES | {"lost"}
+MERGE_MARKABLE_STATES = (CLOSABLE_STATES - {"start_failed"}) | {"lost"}
 IDLE_AGENT_STATUSES = frozenset({"idle", "done"})
 _QUOTED_ARTIFACT = re.compile(r"[`\"']([^`\"'\r\n]+\.(?:md|html))[`\"']", re.IGNORECASE)
 _BARE_ARTIFACT = re.compile(
@@ -65,7 +69,12 @@ def _last_assistant_text(records):
     return None
 
 
-def _artifact(text, worktree_path):
+def _artifact(text, worktree_path, *, ops, worker, records, accept=None):
+    """The first file the final text names that this worker added or changed in its worktree.
+
+    A final message often mentions existing repo files (AGENTS.md, a source file it read);
+    naming one is no proof the run produced it. `accept`, when given, must also pass for the file.
+    """
     if not text or not worktree_path:
         return None
     paths = [match.group(1) for match in _QUOTED_ARTIFACT.finditer(text)]
@@ -74,7 +83,10 @@ def _artifact(text, worktree_path):
         root = Path(worktree_path).resolve()
         for name in paths:
             candidate = (root / name).resolve()
-            if candidate.is_relative_to(root) and candidate.is_file():
+            if (candidate.is_relative_to(root) and candidate.is_file()
+                    and (accept is None or accept(candidate))
+                    and (_written_in_transcript(candidate, root, records)
+                         or _changed_by_worker(candidate, worker, ops))):
                 return candidate
     except (OSError, ValueError):
         return None
@@ -97,6 +109,160 @@ def _changed_by_worker(artifact, worker, ops):
     if not (status.ok and diff.ok):
         return False  # an unreadable answer never proves the artifact changed
     return bool(status.stdout.strip()) or bool(diff.stdout.strip())
+
+
+_FILE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
+
+
+def _written_in_transcript(artifact, root, records):
+    """True when this run's transcript shows a file tool writing the artifact successfully.
+
+    Git history cannot show authorship once the worker's commit is merged and fetched (status
+    and the three-dot diff are then empty), and a diff from the branch's creation also counts
+    upstream changes a rebase brought in. The transcript is bound to this run.
+    """
+    writes = set()
+    for record in records:
+        if record.get("type") not in {"assistant", "user"}:
+            continue  # api-request-blob and similar wire copies repeat tool blocks
+        content = (record.get("message") or {}).get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") in _FILE_TOOLS:
+                tool_input = block.get("input")
+                named = tool_input.get(_FILE_TOOLS[block["name"]]) if isinstance(tool_input, dict) else None
+                tool_id = block.get("id")
+                if isinstance(named, str) and named and isinstance(tool_id, str) and tool_id:
+                    try:
+                        if (root / named).resolve() == artifact:
+                            writes.add(tool_id)  # a missing id must never pair with a missing tool_use_id
+                    except (OSError, ValueError):
+                        continue
+            elif (block.get("type") == "tool_result" and block.get("tool_use_id") in writes
+                    and block.get("is_error") is not True):
+                return True
+    return False
+
+
+# YAML starts a comment only after whitespace; "ce-brainstorm#draft" is a different value.
+_CONTRACT_LINE = re.compile(r"^artifact_contract:\s*['\"]?ce-unified-plan/v1['\"]?(?:\s+#.*)?\s*$", re.MULTILINE)
+_SOURCE_LINE = re.compile(r"^product_contract_source:\s*['\"]?ce-brainstorm['\"]?(?:\s+#.*)?\s*$", re.MULTILINE)
+# HTML plans show the metadata in a visible header; the value must follow its own label.
+_HTML_CONTRACT = re.compile(r"artifact[_ ]contract\W{0,20}ce-unified-plan/v1\b", re.IGNORECASE)
+_HTML_SOURCE = re.compile(r"(?:product[_ ])?contract[_ ]source\W{0,20}ce-brainstorm\b", re.IGNORECASE)
+_PLAN_READ_LIMIT = 4 * 1024 * 1024  # an HTML plan may inline a large stylesheet before its header
+
+
+def _is_brainstorm_plan(path):
+    """A ce-brainstorm requirements plan: under a plans directory, marked with the brainstorm contract.
+
+    ce-brainstorm writes <root>/plans/...-plan.<md|html> with artifact_contract ce-unified-plan/v1
+    and product_contract_source ce-brainstorm; a solutions note or any other file it writes is not one.
+    """
+    if path.parent.name.lower() != "plans":
+        return False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            text = handle.read(_PLAN_READ_LIMIT)
+    except OSError:
+        return False
+    if path.suffix.lower() == ".md":
+        lines = text.lstrip("﻿").splitlines()
+        if not lines or lines[0].strip() != "---":
+            return False
+        end = next((index for index, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
+        if end is None:
+            return False
+        text = "\n".join(lines[1:end])
+        return bool(_CONTRACT_LINE.search(text) and _SOURCE_LINE.search(text))
+    # The HTML rendering shows this metadata as visible text rather than frontmatter.
+    visible = re.sub(r"\s+", " ", html.unescape(re.sub(r"<style\b.*?</style>|<script\b.*?</script>|<[^>]+>", " ",
+                                                       text, flags=re.IGNORECASE | re.DOTALL)))
+    return bool(_HTML_CONTRACT.search(visible) and _HTML_SOURCE.search(visible))
+
+
+LATER_STAGES = frozenset({"ce-plan", "ce-work", "ce-debug", "lfg"})
+_COMMAND_NAME = re.compile(r"<command-name>\s*/?([^<\s]+)\s*</command-name>")
+
+
+def _stage_name(name):
+    return name.strip().lstrip("/").rsplit(":", 1)[-1] if isinstance(name, str) else None
+
+
+def later_stage(records):
+    """The first build stage (ce-plan, ce-work, ce-debug, lfg) this transcript started, or None.
+
+    A brainstorm or strategy worker may carry on into planning and building in the same session;
+    its requirements document then no longer proves the run finished. A Skill call counts once its
+    result arrives without an error, so a denied call does not move the run on.
+    """
+    calls = {}
+    for record in records:
+        if record.get("type") not in {"assistant", "user"} or record.get("isSidechain", False) is not False:
+            continue
+        content = (record.get("message") or {}).get("content")
+        if record["type"] == "user":
+            texts = [content] if isinstance(content, str) else [
+                block.get("text") for block in content or []
+                if isinstance(block, dict) and block.get("type") == "text"]
+            for text in texts:
+                # Only a slash-command record; a loaded skill body may quote command tags.
+                if not isinstance(text, str) or not text.lstrip().startswith(("<command-message>", "<command-name>")):
+                    continue
+                match = _COMMAND_NAME.search(text)
+                if match and _stage_name(match.group(1)) in LATER_STAGES:
+                    return _stage_name(match.group(1))
+            for block in content if isinstance(content, list) else []:
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and block.get("tool_use_id") in calls and block.get("is_error") is not True):
+                    return calls[block["tool_use_id"]]
+            continue
+        for block in content if isinstance(content, list) else []:
+            if (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Skill"
+                    and isinstance(block.get("input"), dict) and isinstance(block.get("id"), str) and block["id"]
+                    and _stage_name(block["input"].get("skill")) in LATER_STAGES):
+                calls[block["id"]] = _stage_name(block["input"]["skill"])
+    return None
+
+
+def _status_paths(output):
+    """Every path in `git status --porcelain -z`: "XY path" entries, untracked ones included.
+
+    A rename or copy entry is followed by a field holding its source path.
+    """
+    paths, fields = set(), iter(output.split("\0"))
+    for entry in fields:
+        if not entry.strip():
+            continue
+        paths.add(entry[3:])
+        if "R" in entry[:2] or "C" in entry[:2]:
+            paths.add(next(fields, ""))
+    return paths - {""}
+
+
+def _diff_paths(output):
+    """Every path in `git diff --name-only -z`."""
+    return {entry for entry in output.split("\0") if entry.strip()}
+
+
+def _changed_beyond(artifact, worker, ops):
+    """True when the branch or its tracked files changed anything but the artifact, or git cannot say.
+
+    A brainstorm or strategy run writes its document; code changes mean it went on to build,
+    however that started.
+    """
+    worktree = worker.get("worktree_path")
+    try:
+        relative = Path(artifact).resolve().relative_to(Path(worktree).resolve()).as_posix()
+        status = ops.git("status", "--porcelain", "-z", cwd=worktree, timeout=COMMAND_TIMEOUT)
+        diff = ops.git("diff", "--name-only", "-z", "origin/main...HEAD", cwd=worktree, timeout=COMMAND_TIMEOUT)
+    except (OSError, TimeoutError, ValueError, TypeError):
+        return True
+    if not (status.ok and diff.ok):
+        return True  # unreadable: never let it prove the run stopped at its document
+    changed = {os.path.normcase(path.rstrip("\r\n")) for path in _status_paths(status.stdout) | _diff_paths(diff.stdout)}
+    return bool(changed - {os.path.normcase(relative)})
 
 
 def _reason(result):
@@ -152,20 +318,31 @@ def verify_done(worker: dict, *, ops, config: dict, now: float, records: list[di
     """Return a decision using transcript/artifact evidence and GitHub reads only."""
     final = _last_assistant_text(records)
     command = worker.get("entry_command", "").lstrip("/").rsplit(":", 1)[-1]
+    # The watcher records the stage from the whole transcript; these records may be trimmed.
+    advanced = worker.get("advanced_stage") or later_stage(records)
+    if command in {"ce-brainstorm", "ce-strategy"} and advanced:
+        command = "ce-work"  # the run went on to build, so only a PR proves it finished
     if command == "ce-brainstorm":
-        artifact = _artifact(final, worker.get("worktree_path"))
-        if artifact:
-            return _decision("done", f"requirements artifact exists: {artifact}")
-        return _decision(
-            "ended_without_proof", "final message names no existing requirements artifact inside the worktree",
-            final_message=final,
-        )
+        artifact = _artifact(final, worker.get("worktree_path"), ops=ops, worker=worker, records=records,
+                             accept=_is_brainstorm_plan)
+        if artifact and _changed_beyond(artifact, worker, ops):
+            command = "ce-work"  # it changed more than its plan, so it built something: needs a PR
+        elif artifact:
+            return _decision("done", f"requirements artifact written: {artifact}", final_message=final)
+        else:
+            return _decision(
+                "ended_without_proof",
+                "final message names no requirements plan this worker wrote under the plans directory",
+                final_message=final,
+            )
     if command == "ce-strategy":
         # A strategy run ends with a document such as STRATEGY.md, and sometimes a PR instead.
-        artifact = _artifact(final, worker.get("worktree_path"))
         # STRATEGY.md often already exists; only an artifact this worker added or changed proves the run.
-        if artifact and _changed_by_worker(artifact, worker, ops):
-            return _decision("done", f"strategy artifact written: {artifact}")
+        artifact = _artifact(final, worker.get("worktree_path"), ops=ops, worker=worker, records=records)
+        if artifact and _changed_beyond(artifact, worker, ops):
+            artifact = None  # it changed more than its document, so only a PR proves the run
+        if artifact:
+            return _decision("done", f"strategy artifact written: {artifact}", final_message=final)
     if command not in {"ce-work", "ce-debug", "lfg", "ce-strategy"}:
         return _decision("ended_without_proof", "unsupported entry command", final_message=final)
 
@@ -269,8 +446,9 @@ def _close_refusal(worker, agent, ops):
     """Why a live agent may not be closed by cleanup, or None when it may."""
     if worker.get("state") not in CLOSABLE_STATES:
         return "agent is still alive; its process must exit before cleanup"
-    data = (agent.data or {}).get("result", {}).get("agent") if isinstance(agent.data, dict) else None
-    status = (data.get("agent_status") or data.get("status")) if isinstance(data, dict) else None
+    if worker.get("state") == "start_failed" and worker.get("abandoned") is not True:
+        return "a failed start's open session is closed only when the user abandons the worker"
+    status = _agent_status(agent)
     if status not in IDLE_AGENT_STATUSES:
         return f"agent is {status or 'in an unknown state'}; cleanup closes only an idle finished worker"
     if not worker.get("workspace_id"):
@@ -283,7 +461,19 @@ def _close_refusal(worker, agent, ops):
         return f"cannot confirm the worktree is clean: {_reason(status_result)}"
     if status_result.stdout.strip():
         return "worktree has uncommitted changes; nothing was closed"
+    # Look again just before closing: a late entry (a failed start's delayed command) or the user's own
+    # typing can set the agent working while the worktree was checked. This narrows the window;
+    # herdr has no close-if-idle, so it cannot remove it.
+    again = ops.herdr("agent", "get", worker["agent_name"], timeout=COMMAND_TIMEOUT)
+    status = _agent_status(again) if again.ok else None
+    if status not in IDLE_AGENT_STATUSES:
+        return f"agent became {status or 'unreadable'} during cleanup; nothing was closed"
     return None
+
+
+def _agent_status(agent):
+    data = (agent.data or {}).get("result", {}).get("agent") if isinstance(agent.data, dict) else None
+    return (data.get("agent_status") or data.get("status")) if isinstance(data, dict) else None
 
 
 def _registered(worker, ops):

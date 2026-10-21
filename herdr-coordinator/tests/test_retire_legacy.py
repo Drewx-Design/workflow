@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+    __import__("os").environ.pop(key, None)  # a suite run inside herdr must not resolve a real lane
 
 from contextlib import contextmanager, redirect_stdout
 import io
@@ -19,6 +21,15 @@ from test_repo_root import RepoFixture
 
 
 class RetireLegacyTests(RepoFixture):
+    def setUp(self):
+        super().setUp()
+        environment = dict(os.environ)
+        for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+            environment.pop(key, None)
+        patcher = mock.patch.dict(os.environ, environment, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def cli(self, *argv, home=None):
         with mock.patch.dict(os.environ), redirect_stdout(io.StringIO()) as output:
             os.environ.pop("HERDR_COORD_HOME", None)
@@ -36,10 +47,20 @@ class RetireLegacyTests(RepoFixture):
                 "repo_path": r"c:\users\user\codeprojects\taste-swipe",
                 "worktree_path": r"c:\users\user\codeprojects\taste-swipe-worktrees\issue-21"}
 
-    def layout(self, *, workers=None, queue=None, events=()):
+    def layout(self, *, workers=None, queue=None, events=(), version=1):
         self.base.mkdir(parents=True, exist_ok=True)
         doc = {"version": 1, "workers": workers or {}, "queue": queue or [],
                "holds": {}, "event_seq": 71, "ack_seq": 71}
+        if version in (2, 3):
+            doc["version"] = version
+            doc["lanes"] = {"main": {"ack_seq": doc.pop("ack_seq"), "follow_lease": None,
+                                     "unattended_since": None, "last_alert_at": None}}
+            if version == 2:
+                doc["workspace_bindings"] = {}
+            for worker in [*doc["workers"].values(), *doc["queue"]]:
+                worker["lane"] = "main"
+            if version == 3:
+                doc["tab_bindings"] = {}
         (self.base / "registry.json").write_text(json.dumps(doc), encoding="utf-8")
         (self.base / "events.jsonl").write_text(
             "".join(json.dumps({"seq": seq}) + "\n" for seq in events), encoding="utf-8")
@@ -211,6 +232,62 @@ class RetireLegacyTests(RepoFixture):
         self.assertEqual((self.base / "transaction.json").read_bytes(), transaction)
         self.assertEqual(self.snapshot(), before)
 
+    def test_v2_retirement_preserves_drain_blockers(self):
+        self.check_retirement_preserves_drain_blockers(2)
+
+    def test_v3_retirement_preserves_drain_blockers(self):
+        self.check_retirement_preserves_drain_blockers(3)
+
+    def check_retirement_preserves_drain_blockers(self, version):
+        cases = (
+            ("events", ["unacknowledged_events"]),
+            ("queue", ["queued_issues"]),
+            ("done", ["owes_cleanup"]),
+            ("active", ["active_worker"]),
+            ("lost", ["lost_worker"]),
+            ("watcher", ["watcher_running"]),
+            ("transaction", ["interrupted_commit"]),
+            ("archive", []),
+        )
+        for case, kinds in cases:
+            with self.subTest(row=case), mock.patch.dict(os.environ):
+                self.base = self.root / case
+                os.environ["HERDR_COORD_BASE"] = str(self.base)
+                state = {"done": "done", "active": "running", "lost": "lost"}.get(case, "cleaned")
+                doc = self.layout(workers={"worker": self.worker(state)}, version=version,
+                                  queue=[{"issue": 42}] if case == "queue" else [],
+                                  events=[71, 72, 74] if case == "events" else [71])
+                # Only the main lane's cursor counts, even if a stale v1 cursor remains.
+                doc["ack_seq"] = 999 if case == "events" else 0
+                doc["notification_seq"] = 999
+                (self.base / "registry.json").write_text(json.dumps(doc), encoding="utf-8")
+                if case == "transaction":
+                    self.transaction()
+                before = self.snapshot()
+                with mock.patch.object(registry, "locked", side_effect=AssertionError("legacy lock forbidden")), \
+                        mock.patch.object(registry, "load", side_effect=AssertionError("legacy load forbidden")), \
+                        mock.patch.object(registry, "_recover_transaction", side_effect=AssertionError("recovery forbidden")), \
+                        mock.patch.object(registry, "update", side_effect=AssertionError("legacy update forbidden")), \
+                        mock.patch.object(registry, "read_events", side_effect=AssertionError("legacy events forbidden")):
+                    if case == "watcher":
+                        with self.held_watcher():
+                            code, result = self.retire()
+                    else:
+                        code, result = self.retire()
+                self.assertEqual(code, 1 if kinds else 0, result)
+                self.assertEqual(result["state"], "refused" if kinds else "retired", result)
+                self.assertEqual([b["kind"] for b in result.get("blockers", [])], kinds)
+                if kinds:
+                    self.assertEqual(self.snapshot(), before)
+                    self.assertEqual(list(self.base.glob("legacy-*")), [])
+                    if case == "events":
+                        self.assertEqual(result["blockers"][0]["seqs"], [72, 74])
+                else:
+                    archive = Path(result["archive"])
+                    for name in result["files"]:
+                        self.assertEqual((archive / name).read_bytes(), before[name])
+                    self.assertEqual(self.snapshot(), {"registry.lock": before["registry.lock"]})
+
     def test_live_shape_requires_abandon_then_repository_status_works(self):
         lost = self.worker("lost")
         workers = {r"c:\users\user\codeprojects\norm#148": self.worker("cleaned", 148, "norm-148"),
@@ -348,6 +425,50 @@ class RetireLegacyTests(RepoFixture):
                 self.assertEqual(self.snapshot(), before)
                 self.assertEqual(list(self.base.glob("legacy-*")), [])
 
+    def test_malformed_v2_state_refuses_without_deleting(self):
+        self.check_malformed_state_refuses_without_deleting(2)
+
+    def test_malformed_v3_state_refuses_without_deleting(self):
+        self.check_malformed_state_refuses_without_deleting(3)
+
+    def check_malformed_state_refuses_without_deleting(self, version):
+        cases = [
+            ("version", None), ("version", True), ("version", 4), ("version", "2"),
+            ("lanes", None), ("lanes", []), ("lanes", {}),
+            ("lanes", {"main": None}), ("lanes", {"main": []}),
+            ("lanes", {"main": {}}), ("lanes", {"other": {"ack_seq": 71}}),
+            ("lanes", {"main": {"ack_seq": 71}, "other": {"ack_seq": 71}}),
+            ("queue", None), ("queue", [{}]), ("queue", [None]),
+            ("workers", None), ("workers", {"worker": None}),
+            ("workers", {"worker": {"state": [], "lane": "main"}}),
+            ("workers", {"worker": {"state": "cleaned", "agent_name": [], "lane": "main"}}),
+        ]
+        cases += [("lanes", {"main": {"ack_seq": value}}) for value in (-1, True, 71.0, "71")]
+        cases += [("workers", {"worker": {"state": "cleaned", "lane": value}})
+                  for value in (None, "other")]
+        cases += [("queue", [{"issue": 42, "lane": value}]) for value in (None, "other")]
+        if version == 3:
+            cases += [("tab_bindings", value) for value in (None, [], {"w1:t1": {"lane": "main"}})]
+        else:
+            cases += [("workspace_bindings", value) for value in (None, [], {"workspace": {"lane": "main"}})]
+        for index, (field, value) in enumerate(cases):
+            with self.subTest(field=field, value=value), mock.patch.dict(os.environ):
+                self.base = self.root / f"invalid-{index}"
+                os.environ["HERDR_COORD_BASE"] = str(self.base)
+                doc = self.layout(version=version, events=[71])
+                if value is None:
+                    doc.pop(field)
+                else:
+                    doc[field] = value
+                (self.base / "registry.json").write_text(json.dumps(doc), encoding="utf-8")
+                before = self.snapshot()
+                code, result = self.retire()
+                self.assertEqual(code, 1, result)
+                self.assertEqual(result["state"], "refused")
+                self.assertEqual([b["kind"] for b in result["blockers"]], ["malformed_legacy_state"])
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(list(self.base.glob("legacy-*")), [])
+
     def test_legacy_flag_dispatches_drain_commands_without_resolution(self):
         self.layout()
         commands = (["ack", "71"], ["cleanup"], ["resume", "worker"], ["go"],
@@ -369,8 +490,9 @@ class RetireLegacyTests(RepoFixture):
                 dispatch.assert_called_once()
 
     def test_legacy_flag_actually_drains_events_and_holds(self):
-        self.layout(events=[72])
+        self.layout(workers={"worker": self.worker("cleaned")}, events=[72])
         doc = json.loads((self.base / "registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(doc["version"], 1)
         doc["holds"] = {"watcher_lost": {"ts": 1}}
         (self.base / "registry.json").write_text(json.dumps(doc), encoding="utf-8")
         self.assertEqual(self.cli("ack", "72", "--legacy")[0], 0)
@@ -379,8 +501,31 @@ class RetireLegacyTests(RepoFixture):
         with mock.patch.object(watch, "launch", side_effect=AssertionError("legacy go launched a watcher")):
             self.assertEqual(self.cli("go", "--legacy")[0], 0)
         doc = json.loads((self.base / "registry.json").read_text(encoding="utf-8"))
-        self.assertEqual(doc["ack_seq"], 72)
+        self.assertEqual(doc["version"], 3)
+        self.assertEqual(doc["tab_bindings"], {})
+        self.assertEqual(doc["lanes"]["main"]["ack_seq"], 72)
+        self.assertEqual(doc["workers"]["worker"]["lane"], "main")
         self.assertEqual(doc["holds"], {})
+        self.assertEqual(self.cli("ack", str(doc["event_seq"]), "--legacy")[0], 0)
+        before = self.snapshot()
+        code, result = self.retire()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["state"], "retired")
+        archive = Path(result["archive"])
+        self.assertEqual((archive / "registry.json").read_bytes(), before["registry.json"])
+        self.assertEqual(self.snapshot(), {"registry.lock": before["registry.lock"]})
+
+    def test_legacy_status_reports_main_for_workers_and_queue(self):
+        self.layout(workers={"worker": self.worker("cleaned")},
+                    queue=[self.worker("queued", 42, "queued-worker")])
+        before = self.snapshot()
+        code, output = self.cli("status", "--legacy")
+        self.assertEqual(code, 0, output)
+        lines = [line for line in output.splitlines() if line.startswith("#")]
+        self.assertEqual(len(lines), 2, output)
+        self.assertTrue(all(line.endswith("\tlane=main") for line in lines), output)
+        self.assertIn("lane: main\t", output)
+        self.assertEqual(self.snapshot(), before)
 
     def test_legacy_flag_refuses_repo_and_new_work(self):
         self.layout()

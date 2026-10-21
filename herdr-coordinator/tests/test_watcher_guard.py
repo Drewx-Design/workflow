@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+    __import__("os").environ.pop(key, None)  # a suite run inside herdr must not resolve a real lane
 
 import io
 import json

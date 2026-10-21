@@ -1,0 +1,200 @@
+{
+  "id": "cli:pane:list",
+  "result": {
+    "panes": [
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "1acf441e-83ee-4974-b9dd-cb3f54417ad0"
+        },
+        "agent_status": "idle",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p7K",
+        "revision": 2,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t7H",
+        "terminal_id": "term_65dccaa0ac8482",
+        "terminal_title": "✳ Intake work",
+        "terminal_title_stripped": "Intake work",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "65e27ed4-3841-4fec-8caa-6cf0ac3b6bff"
+        },
+        "agent_status": "done",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p6G",
+        "revision": 6,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t6E",
+        "terminal_id": "term_65dccaa0ac8663",
+        "terminal_title": "✳ General assistance",
+        "terminal_title_stripped": "General assistance",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "90a5e687-ee2e-4870-8ff0-f524ac785953"
+        },
+        "agent_status": "working",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p99",
+        "revision": 2,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t93",
+        "terminal_id": "term_65e4f50d8132d68",
+        "terminal_title": "◐ issue 2186",
+        "terminal_title_stripped": "issue 2186",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "760ea7db-3e84-403c-b93c-16e3b57343f6"
+        },
+        "agent_status": "idle",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p7Q",
+        "revision": 2,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t7N",
+        "terminal_id": "term_65dccaa0ac8b26",
+        "terminal_title": "✳ worktrees 2",
+        "terminal_title_stripped": "worktrees 2",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "a8dcc6f6-c060-47d1-bef7-d1e7cc2c385e"
+        },
+        "agent_status": "working",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": true,
+        "pane_id": "w1:p81",
+        "revision": 2,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t7Z",
+        "terminal_id": "term_65dccaa0ac913a",
+        "terminal_title": "◑ sorter session 2",
+        "terminal_title_stripped": "sorter session 2",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "cf0ee4a9-a6ca-4d21-83f7-b3b14b387471"
+        },
+        "agent_status": "idle",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p8Q",
+        "revision": 3,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t8H",
+        "terminal_id": "term_65dccaa0ac93fc",
+        "terminal_title": "✳ action minutes",
+        "terminal_title_stripped": "action minutes",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "15c59644-71a9-4b33-abcd-4b2e8c7942e4"
+        },
+        "agent_status": "idle",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p8T",
+        "revision": 2,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t8M",
+        "terminal_id": "term_65dccaa0ac955d",
+        "terminal_title": "✳ Analytics setup",
+        "terminal_title_stripped": "Analytics setup",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "a39d127e-c73f-4fc3-8228-38083a5bbb68"
+        },
+        "agent_status": "idle",
+        "cwd": "C:\\Users\\user\\CodeProjects\\boon-town",
+        "focused": false,
+        "pane_id": "w1:p8Z",
+        "revision": 3,
+        "scroll": {
+          "max_offset_from_bottom": 0,
+          "offset_from_bottom": 0,
+          "viewport_rows": 44
+        },
+        "tab_id": "w1:t8S",
+        "terminal_id": "term_65e46c41e73874c",
+        "terminal_title": "✳ Mentions research",
+        "terminal_title_stripped": "Mentions research",
+        "workspace_id": "w1"
+      }
+    ],
+    "type": "pane_list"
+  }
+}

@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 import adapters
+import lanes
 import registry
 import repo_root
 import transcript
@@ -185,31 +186,33 @@ def _admit(candidate) -> tuple[dict, bool]:
     owner = _start_owner()
     outcome = {}
 
-    def admit(doc):
+    def admit(doc, events):
         existing = doc["workers"].get(worker_id)
+        queued = next((item for item in doc["queue"] if item["worker_id"] == worker_id), None)
+        owned = existing if existing and existing.get("state") != "cleaned" else queued
+        if owned and owned.get("lane", "main") != candidate.get("lane", "main"):
+            raise StartError(f"issue #{candidate['issue']} is already owned by lane {owned.get('lane', 'main')}")
         if existing and existing.get("state") != "cleaned":
             outcome.update(worker=existing, run=False)
             return
         if existing:
             # A new candidate inherits none of the cleaned run's receipts or phases.
             doc["workers"].pop(worker_id)
-        queued = next((item for item in doc["queue"] if item["worker_id"] == worker_id), None)
         worker = dict(queued or candidate)
         if doc["holds"] or not _has_slot(doc):
             worker["state"] = "queued"
             if queued is None:
                 doc["queue"].append(worker)
-                outcome["event"] = "issue_queued"
+                events.append(("issue_queued", worker))
             outcome.update(worker=worker, run=False)
         else:
             if queued is not None:
                 doc["queue"].remove(queued)
             _claim(doc, worker, owner)
-            outcome.update(worker=worker, run=True, event="worker_starting")
+            outcome.update(worker=worker, run=True)
+            events.append(("worker_starting", worker))
 
-    registry.update(admit)
-    if "event" in outcome:
-        registry.append_event(outcome["event"], outcome["worker"])
+    registry.update_with_events(admit, caller_lane=candidate.get("lane", "main"))
     return outcome["worker"], outcome["run"]
 
 
@@ -224,7 +227,8 @@ def _wait_for_path(path):
 
 def _create_worktree(worker, ops):
     worker_id = worker["worker_id"]
-    label = f"{repo_root.display_name(worker['repo_path'])} #{worker['issue']}"
+    lane = worker.get("lane", "main")
+    label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"])
     if not worker.get("worktree_created"):
         _call(ops.git, "fetch", "origin", cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
         result = _run(
@@ -485,39 +489,61 @@ def _run_worker(worker, ops, *, keepalive=None, resend_entry=False):
         )
 
 
-def start_issues(repo_path, issues, *, ops=adapters) -> list[dict]:
+def start_issues(repo_path, issues, *, lane="main", ops=adapters) -> list[dict]:
     repo = str(Path(repo_path).resolve())
     summaries = []
-    for issue in issues:
+    for position, issue in enumerate(issues):
         try:
-            number = int(str(issue).lstrip("#"))
-            if number <= 0:
-                raise ValueError("issue numbers must be positive")
-        except ValueError as exc:
-            summaries.append({"issue": issue, "state": "refused", "reason": str(exc)})
-            continue
-        try:
-            result = _call(
-                ops.gh, "issue", "view", str(number), "--json", "number,title,labels,body",
-                cwd=repo, timeout=COMMAND_TIMEOUT,
-            )
-            data = result.data
-            if not isinstance(data, dict) or data.get("number") != number:
-                raise StartError("gh returned no matching issue")
-            labels = [label.get("name", "") if isinstance(label, dict) else label for label in data.get("labels", [])]
-            entry = parse_entry_command(labels, data.get("body") or "")
-            worker_id = f"{os.path.normcase(repo)}#{number}"
-            existing = registry.load()["workers"].get(worker_id)
-            if entry is None and (existing is None or existing.get("state") == "cleaned"):
-                raise StartError("issue has no assigned CE entry command")
-        except StartError as exc:
-            summary = {"issue": number, "repo_path": repo, "state": "refused", "reason": str(exc)}
-            registry.append_event("issue_refused", summary)
-            summaries.append(summary)
-            continue
+            _start_issue(repo, issue, summaries, ops, lane=lane)
+        except Exception as exc:
+            # Earlier issues may have started: the caller reports what the registry holds for each,
+            # never a blanket failure.
+            exc.start_summaries = [
+                *summaries, _interrupted_summary(repo, issue, exc),
+                *({"issue": rest, "repo_path": repo, "state": "not_attempted",
+                   "reason": f"start stopped at issue {issue}"} for rest in issues[position + 1:]),
+            ]
+            raise
+    return summaries
+
+
+def _interrupted_summary(repo, issue, exc):
+    summary = {"issue": issue, "repo_path": repo, "state": "start_error", "reason": str(exc)}
+    try:
+        number = int(str(issue).lstrip("#"))
+        worker = registry.load()["workers"].get(f"{os.path.normcase(repo)}#{number}")
+    except Exception:
+        return summary
+    if worker is not None:
+        summary.update(issue=number, state=worker.get("state"), worker_state_recorded=True)
+    return summary
+
+
+def _start_issue(repo, issue, summaries, ops, *, lane="main"):
+    try:
+        number = int(str(issue).lstrip("#"))
+        if number <= 0:
+            raise ValueError("issue numbers must be positive")
+    except ValueError as exc:
+        summaries.append({"issue": issue, "state": "refused", "reason": str(exc)})
+        return
+    try:
+        result = _call(
+            ops.gh, "issue", "view", str(number), "--json", "number,title,labels,body",
+            cwd=repo, timeout=COMMAND_TIMEOUT,
+        )
+        data = result.data
+        if not isinstance(data, dict) or data.get("number") != number:
+            raise StartError("gh returned no matching issue")
+        labels = [label.get("name", "") if isinstance(label, dict) else label for label in data.get("labels", [])]
+        entry = parse_entry_command(labels, data.get("body") or "")
+        worker_id = f"{os.path.normcase(repo)}#{number}"
+        existing = registry.load()["workers"].get(worker_id)
+        if entry is None and (existing is None or existing.get("state") == "cleaned"):
+            raise StartError("issue has no assigned CE entry command")
         command, args = entry or ("", "")
         candidate = {
-            "worker_id": worker_id, "issue": number, "repo_path": repo,
+            "worker_id": worker_id, "issue": number, "repo_path": repo, "lane": lane,
             "title": data.get("title", ""), "entry_command": command,
             "entry_args": args or f"#{number}", "phase": None,
             "branch": f"issue/{number}",
@@ -525,8 +551,12 @@ def start_issues(repo_path, issues, *, ops=adapters) -> list[dict]:
             "permission_mode": registry.load()["config"].get("permission_mode", DEFAULT_PERMISSION_MODE),
         }
         worker, admitted = _admit(candidate)
-        summaries.append(_run_worker(worker, ops) if admitted else worker)
-    return summaries
+    except StartError as exc:
+        summary = {"issue": number, "repo_path": repo, "state": "refused", "reason": str(exc)}
+        registry.append_event("issue_refused", summary, caller_lane=lane)
+        summaries.append(summary)
+        return
+    summaries.append(_run_worker(worker, ops) if admitted else worker)
 
 
 def start_next_queued(*, ops=adapters, keepalive=None) -> dict | None:
@@ -534,23 +564,24 @@ def start_next_queued(*, ops=adapters, keepalive=None) -> dict | None:
     admitted = []
     owner = _start_owner()
 
-    def take(doc):
+    def take(doc, events):
         if doc["holds"] or not _has_slot(doc) or not doc["queue"]:
             return
         worker = doc["queue"].pop(0)
         _claim(doc, worker, owner)
         admitted.append(worker)
+        events.append(("worker_starting", worker))
 
-    registry.update(take)
+    registry.update_with_events(take)
     if not admitted:
         return None
     worker = admitted[0]
-    registry.append_event("worker_starting", worker)
     return _run_worker(worker, ops, **({"keepalive": keepalive} if keepalive else {}))
 
 
-def restart(name, *, ops=adapters) -> dict:
+def restart(name, *, lane="main", ops=adapters) -> dict:
     """Explicitly claim an interrupted start, or a failed one whose entry never arrived, and reuse its completed phases."""
+
     owner = _start_owner()
     admitted = []
     resend = []
@@ -562,6 +593,7 @@ def restart(name, *, ops=adapters) -> dict:
         if len(matches) != 1:
             raise ValueError(f"expected one worker matching {name}, found {len(matches)}")
         worker = matches[0]
+        lanes.check_worker_lane(worker, lane)
         if doc["holds"]:
             raise ValueError("cannot restart while a hold is open; run go first")
         if worker.get("state") == "start_failed" and _entry_retryable(doc, worker):

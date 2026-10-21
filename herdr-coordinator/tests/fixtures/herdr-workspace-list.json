@@ -1,0 +1,59 @@
+{
+ "id": "cli:workspace:list",
+ "result": {
+  "type": "workspace_list",
+  "workspaces": [
+   {
+    "active_tab_id": "w1:t8S",
+    "agent_status": "working",
+    "focused": false,
+    "label": "boon-town",
+    "number": 1,
+    "pane_count": 12,
+    "tab_count": 12,
+    "workspace_id": "w1",
+    "worktree": {
+     "checkout_path": "C:\\Users\\user\\CodeProjects\\boon-town",
+     "is_linked_worktree": false,
+     "repo_key": "\\\\?\\C:\\Users\\user\\CodeProjects\\boon-town\\.git",
+     "repo_name": "boon-town",
+     "repo_root": "C:\\Users\\user\\CodeProjects\\boon-town"
+    }
+   },
+   {
+    "active_tab_id": "w2:t35",
+    "agent_status": "working",
+    "focused": false,
+    "label": "norm",
+    "number": 2,
+    "pane_count": 8,
+    "tab_count": 8,
+    "workspace_id": "w2",
+    "worktree": {
+     "checkout_path": "C:/Users/user/CodeProjects/norm",
+     "is_linked_worktree": false,
+     "repo_key": "\\\\?\\C:\\Users\\user\\CodeProjects\\norm\\.git",
+     "repo_name": "norm",
+     "repo_root": "C:/Users/user/CodeProjects/norm"
+    }
+   },
+   {
+    "active_tab_id": "w23:t1",
+    "agent_status": "idle",
+    "focused": false,
+    "label": "norm #339",
+    "number": 12,
+    "pane_count": 1,
+    "tab_count": 1,
+    "workspace_id": "w23",
+    "worktree": {
+     "checkout_path": "C:\\Users\\user\\CodeProjects\\norm-wt-issue-339",
+     "is_linked_worktree": true,
+     "repo_key": "\\\\?\\C:\\Users\\user\\CodeProjects\\norm\\.git",
+     "repo_name": "norm",
+     "repo_root": "C:\\Users\\user\\CodeProjects\\norm"
+    }
+   }
+  ]
+ }
+}

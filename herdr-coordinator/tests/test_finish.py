@@ -22,6 +22,9 @@ import transcript
 
 NOW = datetime(2026, 10, 6, 22, 0, tzinfo=timezone.utc).timestamp()
 FIXTURE = Path(__file__).parent / "fixtures" / "session-probe-full.jsonl"
+# What ce-brainstorm writes (CE 3.30.4, norm #330): the brainstorm contract in frontmatter.
+PLAN_TEXT = ("---\ntitle: X - Plan\ntype: feat\nartifact_contract: ce-unified-plan/v1\n"
+             "product_contract_source: ce-brainstorm\nexecution: code\n---\n\n# X - Plan\n")
 
 
 def success(data=None):
@@ -133,11 +136,25 @@ class FinishTest(unittest.TestCase):
         self.assertEqual(set(decision), {"state", "pr", "url", "no_ci", "overdue", "detail", "final_message"})
         return decision
 
-    def artifact(self, path="docs/brainstorms/x-requirements.md"):
+    def artifact(self, path="docs/plans/x-requirements.md"):
         artifact = self.worktree / path
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text("# Requirements\n", encoding="utf-8")
+        artifact.write_text(PLAN_TEXT, encoding="utf-8")
         return artifact
+
+    def worker_wrote(self, *paths):
+        """git status reports these worktree paths as changed; every other path is untouched."""
+        written = set(paths)
+
+        def git(*args, **kwargs):
+            if args[:2] != ("status", "--porcelain"):
+                return FakeOps.git(self.ops, *args, **kwargs)
+            self.ops.calls.append(("git", args, kwargs))
+            result = success()
+            result.stdout = f"?? {args[-1]}\n" if args[-1] in written else ""
+            return result
+
+        self.ops.git = git
 
     def test_passing_checks_for_each_pr_entry_command(self):
         for command in ("ce-work", "/ce-debug", "lfg", "/compound-engineering:ce-work"):
@@ -254,15 +271,42 @@ class FinishTest(unittest.TestCase):
     def test_brainstorm_existing_relative_and_absolute_artifacts(self):
         self.worker["entry_command"] = "ce-brainstorm"
         artifact = self.artifact()
-        for named in ("docs/brainstorms/x-requirements.md", str(artifact), artifact.as_posix()):
+        self.worker_wrote("docs/plans/x-requirements.md")
+        for named in ("docs/plans/x-requirements.md", str(artifact), artifact.as_posix()):
             for wrap in ("{}", "`{}`"):
                 with self.subTest(named=named, wrap=wrap):
-                    self.records = records_with_final("Requirements saved to " + wrap.format(named) + ".")
+                    self.ops.calls.clear()
+                    text = "Requirements saved to " + wrap.format(named) + "."
+                    self.records = records_with_final(text)
                     result = self.verify()
                     self.assertEqual(result["state"], "done")
                     self.assertIsNone(result["pr"])
                     self.assertIsNone(result["url"])
-                    self.assertEqual(self.ops.calls, [])
+                    self.assertEqual(result["final_message"], text)
+                    self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
+
+    def test_brainstorm_existing_file_the_worker_did_not_write_is_not_proof(self):
+        # norm #329: the final text asked for confirmation and named docs/AGENTS.md, an existing repo file.
+        self.worker["entry_command"] = "ce-brainstorm"
+        self.artifact("docs/AGENTS.md")
+        self.worker_wrote()
+        text = "Synthesis follows the rules in docs/AGENTS.md. Confirm and I'll write the requirements-only plan next."
+        self.records = records_with_final(text)
+        result = self.verify()
+        self.assertEqual(result["state"], "ended_without_proof")
+        self.assertEqual(result["final_message"], text)
+        self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
+        # A written artifact named after an untouched one still proves the run.
+        self.artifact()
+        self.worker_wrote("docs/plans/x-requirements.md")
+        self.records = records_with_final("Read docs/AGENTS.md; saved docs/plans/x-requirements.md.")
+        result = self.verify()
+        self.assertEqual(result["state"], "done")
+        self.assertIn("x-requirements.md", result["detail"])
+        # Unreadable git status never proves the artifact.
+        del self.ops.git
+        self.ops.git_status = failure("not a git repository")
+        self.assertEqual(self.verify()["state"], "ended_without_proof")
 
     def test_strategy_artifact_is_done_and_without_one_uses_the_pr(self):
         self.worker["entry_command"] = "ce-strategy"
@@ -302,11 +346,178 @@ class FinishTest(unittest.TestCase):
 
     def test_brainstorm_html_and_paths_with_spaces(self):
         self.worker["entry_command"] = "ce-brainstorm"
-        artifact = self.artifact("docs/my brainstorms/x requirements.html")
-        for text in (f"Saved `{artifact}`", "Saved docs/my brainstorms/x requirements.html"):
+        artifact = self.artifact("docs/my work/plans/x requirements.html")
+        self.worker_wrote("docs/my work/plans/x requirements.html")
+        for text in (f"Saved `{artifact}`", "Saved docs/my work/plans/x requirements.html"):
             with self.subTest(text=text):
                 self.records = records_with_final(text)
                 self.assertEqual(self.verify()["state"], "done")
+
+    def stage(self, skill, *, sidechain=False, failed=False):
+        """A Skill call and its result, as norm #330's worker recorded them (Claude Code 2.1.304)."""
+        use = {"type": "assistant", "isSidechain": sidechain, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_stage", "name": "Skill", "input": {"skill": skill, "args": "x"}}]}}
+        result = {"type": "user", "isSidechain": sidechain, "message": {"role": "user", "content": [
+            {"tool_use_id": "toolu_stage", "type": "tool_result", "content": f"Launching skill: {skill}"}
+            | ({"is_error": True} if failed else {})]}}
+        return [use, result]
+
+    def command(self, name, *, wrap=False):
+        text = (f"<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n"
+                f"<command-args>#7</command-args>")
+        if wrap:  # a loaded skill body that quotes a command record is not one
+            text = "Base directory for this skill: x\n\nExample: " + text
+        return {"type": "user", "isSidechain": False, "message": {"role": "user", "content": text}}
+
+    def test_brainstorm_file_that_is_not_a_requirements_plan_is_not_proof(self):
+        # norm #330, 2026-10-20: mid-build, the final message named a solutions note the worker wrote.
+        self.worker["entry_command"] = "ce-brainstorm"
+        notes = "docs/solutions/integration-issues/sessionstart-systemmessage-is-user-visible.md"
+        self.artifact(notes)
+        self.worker_wrote(notes, "docs/plans/bare-plan.md", "docs/plans/body-only.md", "docs/plans/x-requirements.md")
+        plain = self.artifact("docs/plans/bare-plan.md")
+        plain.write_text("# Plan without frontmatter\n", encoding="utf-8")
+        body = self.artifact("docs/plans/body-only.md")
+        body.write_text("# Plan\n\nartifact_contract: ce-unified-plan/v1\nproduct_contract_source: ce-brainstorm\n",
+                        encoding="utf-8")
+        other = self.artifact("docs/plans/x-requirements.md")
+        other.write_text(PLAN_TEXT.replace("ce-brainstorm", "ce-plan"), encoding="utf-8")
+        for named in (notes, "docs/plans/bare-plan.md", "docs/plans/body-only.md", "docs/plans/x-requirements.md"):
+            with self.subTest(named=named):
+                self.records = records_with_final(f"U6 done; wrote and committed `{named}`. Next U7.")
+                result = self.verify()
+                self.assertEqual(result["state"], "ended_without_proof")
+                self.assertIn("requirements plan", result["detail"])
+        other.write_text(PLAN_TEXT, encoding="utf-8")
+        self.assertEqual(self.verify()["state"], "done")
+
+    def test_brainstorm_that_moved_on_to_build_needs_a_pr(self):
+        self.worker["entry_command"] = "ce-brainstorm"
+        self.artifact()
+        self.worker_wrote("docs/plans/x-requirements.md")
+        final = records_with_final("Progress: U6 done, plan at docs/plans/x-requirements.md. Starting U7.")
+        for label, records in (
+            ("skill ce-plan", [*self.stage("compound-engineering:ce-plan"), *final]),
+            ("skill ce-work", [*self.stage("compound-engineering:ce-work"), *final]),
+            ("skill lfg", [*self.stage("lfg"), *final]),
+            ("command ce-work", [self.command("compound-engineering:ce-work"), *final]),
+            ("recorded stage", final),
+        ):
+            with self.subTest(label):
+                self.worker.pop("advanced_stage", None)
+                if label == "recorded stage":
+                    self.worker["advanced_stage"] = "ce-work"
+                self.records = records
+                self.ops.calls.clear()
+                self.ops.prs = success([])
+                result = self.verify()
+                self.assertEqual(result["state"], "ended_without_proof")
+                self.assertEqual(result["detail"], "no open PR on the worker branch")
+                self.assertTrue([call for call in self.ops.calls if call[0] == "gh"])
+                self.ops.prs = success([pr()])
+                result = self.verify()
+                self.assertEqual(result["state"], "done")
+                self.assertEqual(result["pr"], 42)
+        self.worker.pop("advanced_stage")
+        # Neither a sidechain's skill, a skill body quoting a command, nor a non-build skill moves the run on.
+        for records in ([*self.stage("compound-engineering:ce-work", sidechain=True), *final],
+                        [self.command("compound-engineering:ce-work", wrap=True), *final],
+                        [*self.stage("compound-engineering:ce-doc-review"), *final],
+                        [self.command("compound-engineering:ce-brainstorm"), *final]):
+            with self.subTest(first=records[0]["type"]):
+                self.records = records
+                self.ops.calls.clear()
+                self.assertEqual(self.verify()["state"], "done")
+                self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
+
+    def test_strategy_that_moved_on_to_build_needs_a_pr(self):
+        self.worker["entry_command"] = "ce-strategy"
+        self.artifact("STRATEGY.md")
+        self.worker_wrote("STRATEGY.md")
+        self.records = [*self.stage("compound-engineering:ce-work"), *records_with_final("Strategy in STRATEGY.md.")]
+        self.ops.prs = success([])
+        self.assertEqual(self.verify()["state"], "ended_without_proof")
+
+    def test_later_stage_reads_the_real_producer_shape(self):
+        # A Skill call as norm #330's worker made it (Claude Code 2.1.304, CE 3.30.4).
+        records, _ = transcript.read_records(FIXTURE)
+        self.assertIsNone(finish.later_stage(records))
+        self.assertEqual(finish.later_stage([*records, *self.stage("compound-engineering:ce-plan")]), "ce-plan")
+        self.assertIsNone(finish.later_stage([dict(record, type="api-request-blob")
+                                              for record in self.stage("compound-engineering:ce-plan")]))
+        # A denied call, or one whose result has not arrived, has not moved the run on.
+        self.assertIsNone(finish.later_stage(self.stage("compound-engineering:ce-work", failed=True)))
+        self.assertIsNone(finish.later_stage(self.stage("compound-engineering:ce-work")[:1]))
+
+    def test_brainstorm_that_changed_more_than_its_plan_needs_a_pr(self):
+        # However the build started (a plain prompt, a subagent), changed code means it went on.
+        self.worker["entry_command"] = "ce-brainstorm"
+        self.artifact()
+        self.records = records_with_final("Plan at docs/plans/x-requirements.md.")
+        self.ops.prs = success([])
+        for label, status, diff, expected in (
+            ("plan only, uncommitted", "?? docs/plans/x-requirements.md\0", "", "done"),
+            ("plan only, committed", "", "docs/plans/x-requirements.md\0", "done"),
+            ("other case, same file", "?? DOCS/Plans/x-requirements.md\0", "", "done" if os.name == "nt"
+             else "ended_without_proof"),
+            ("untracked new code", "?? docs/plans/x-requirements.md\0?? src/new.py\0", "", "ended_without_proof"),
+            ("renamed plan", "R  docs/plans/x-requirements.md\0docs/plans/old.md\0", "", "ended_without_proof"),
+            ("diff path that looks like a status entry", "",
+             "docs/plans/x-requirements.md\0ab docs/plans/x-requirements.md\0", "ended_without_proof"),
+            ("diff path starting with ??", "", "?? docs/plans/x-requirements.md\0", "ended_without_proof"),
+            ("committed code", "", "docs/plans/x-requirements.md\0scripts/alarm.py\0", "ended_without_proof"),
+            ("modified tracked file", " M scripts/alarm.py\0?? docs/plans/x-requirements.md\0", "",
+             "ended_without_proof"),
+            ("renamed file", "R  scripts/new.py\0scripts/old.py\0", "docs/plans/x-requirements.md\0",
+             "ended_without_proof"),
+        ):
+            with self.subTest(label):
+                self.ops.calls.clear()
+                self.ops.git_status = success()
+                self.ops.git_status.stdout = status
+                self.ops.git_diff = success()
+                self.ops.git_diff.stdout = diff
+                result = self.verify()
+                self.assertEqual(result["state"], expected)
+                self.assertEqual(bool([call for call in self.ops.calls if call[0] == "gh"]), expected != "done")
+        # Git that cannot answer never lets the plan prove the run; the transcript still names the write.
+        self.records = [*self.wrote(self.worktree / "docs/plans/x-requirements.md"),
+                        *records_with_final("Plan at docs/plans/x-requirements.md.")]
+        self.ops.git_status = failure("not a git repository")
+        self.assertEqual(self.verify()["state"], "ended_without_proof")
+        self.ops.git_status = success()
+        self.ops.git_diff = failure("unknown revision origin/main")
+        self.assertEqual(self.verify()["state"], "ended_without_proof")
+
+    def test_brainstorm_plan_shapes(self):
+        cases = (
+            ("docs/plans/a.md", PLAN_TEXT, True),
+            ("docs/plans/crlf.md", PLAN_TEXT.replace("\n", "\r\n"), True),
+            ("docs/plans/bom.md", "\ufeff" + PLAN_TEXT, True),
+            ("docs/plans/quoted.md", PLAN_TEXT.replace("ce-brainstorm", "'ce-brainstorm'"), True),
+            ("docs/plans/comment.md", PLAN_TEXT.replace("ce-unified-plan/v1", "ce-unified-plan/v1  # v1"), True),
+            ("docs/plans/glued.md", PLAN_TEXT.replace("ce-brainstorm", "ce-brainstorm#draft"), False),
+            ("docs/plans/other-source.md", PLAN_TEXT.replace("ce-brainstorm", "ce-plan"), False),
+            ("docs/plans/other-contract.md", PLAN_TEXT.replace("/v1", "/v2"), False),
+            ("docs/plans/unclosed.md", PLAN_TEXT.replace("execution: code\n---", "execution: code"), False),
+            ("docs/solutions/a.md", PLAN_TEXT, False),
+            ("docs/plans/sub/a.md", PLAN_TEXT, False),
+            ("docs/plans/a.html", "<header><dl><dt>artifact_contract</dt><dd>ce-unified-plan/v1</dd>"
+             "<dt>product_contract_source</dt><dd>ce-brainstorm</dd></dl></header>", True),
+            ("docs/plans/big.html", "<style>" + "x" * 200_000 + "</style><p>Artifact contract: ce-unified-plan/v1"
+             " · Contract source: ce-brainstorm</p>", True),
+            ("docs/plans/entities.html", "<p>Artifact&nbsp;contract &middot; ce-unified-plan/v1</p>"
+             "<p>Product&nbsp;contract&nbsp;source &mdash; ce-brainstorm</p>", True),
+            ("docs/plans/prose.html", "<p>artifact_contract: ce-unified-plan/v1</p><p>product_contract_source: "
+             "ce-plan</p><p>Builds on the ce-brainstorm requirements.</p>", False),
+            ("docs/plans/styled.html", "<style>.contract-source::after{content:'ce-brainstorm'}</style>"
+             "<p>artifact_contract: ce-unified-plan/v1</p><p>product_contract_source: ce-plan</p>", False),
+        )
+        for name, content, expected in cases:
+            with self.subTest(name):
+                path = self.artifact(name)
+                path.write_text(content, encoding="utf-8")
+                self.assertEqual(finish._is_brainstorm_plan(path), expected)
 
     def test_brainstorm_missing_outside_and_non_artifact_paths(self):
         self.worker["entry_command"] = "ce-brainstorm"
@@ -315,25 +526,28 @@ class FinishTest(unittest.TestCase):
         other = self.artifact("docs/requirements.txt")
         directory = self.worktree / "directory.md"
         directory.mkdir()
-        for named in ("docs/brainstorms/missing-requirements.md", str(outside), "../outside-requirements.md", str(other), str(directory)):
+        self.worker_wrote("docs/plans/missing-requirements.md", "docs/requirements.txt", "directory.md")
+        for named in ("docs/plans/missing-requirements.md", str(outside), "../outside-requirements.md", str(other), str(directory)):
             with self.subTest(named=named):
                 text = f"Saved `{named}`."
                 self.records = records_with_final(text)
                 result = self.verify()
                 self.assertEqual(result["state"], "ended_without_proof")
                 self.assertEqual(result["final_message"], text)
-                self.assertEqual(self.ops.calls, [])
+                self.assertFalse([call for call in self.ops.calls if call[0] == "gh"])
 
     def test_artifact_url_is_not_a_worktree_path(self):
         self.worker["entry_command"] = "ce-brainstorm"
         self.artifact()
-        self.records = records_with_final("See https://example.test/docs/brainstorms/x-requirements.md")
+        self.worker_wrote("docs/plans/x-requirements.md")
+        self.records = records_with_final("See https://example.test/docs/plans/x-requirements.md")
         self.assertEqual(self.verify()["state"], "ended_without_proof")
 
     def test_artifact_extension_must_be_the_filename_extension(self):
         self.worker["entry_command"] = "ce-brainstorm"
         self.artifact()
-        self.records = records_with_final("Saved docs/brainstorms/x-requirements.md.bak")
+        self.worker_wrote("docs/plans/x-requirements.md")
+        self.records = records_with_final("Saved docs/plans/x-requirements.md.bak")
         self.assertEqual(self.verify()["state"], "ended_without_proof")
 
     def test_no_pr_returns_last_main_thread_assistant_text(self):
@@ -473,6 +687,89 @@ class FinishTest(unittest.TestCase):
             self.skipTest("directory junctions are a Windows feature")
         subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
         self.assertTrue(os.path.isjunction(link))
+
+    def test_brainstorm_artifact_still_proves_the_run_after_its_commit_merges(self):
+        # Review 2026-10-19: once the worker's commit is merged and fetched, origin/main contains it,
+        # so status and the three-dot diff are both empty.
+        def git(*args, cwd):
+            subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                           check=True, capture_output=True)
+        origin, repo = self.root / "origin.git", self.root / "main checkout"
+        git("init", "-q", "--bare", "-b", "main", str(origin), cwd=self.root)
+        git("clone", "-q", str(origin), str(repo), cwd=self.root)
+        (repo / "README.md").write_text("readme", encoding="utf-8")
+        git("add", "README.md", cwd=repo)
+        git("commit", "-qm", "init", cwd=repo)
+        git("push", "-q", "origin", "HEAD:main", cwd=repo)
+        git("fetch", "-q", "origin", cwd=repo)
+        tree = self.root / "real tree"
+        git("worktree", "add", "-q", "-b", "issue/7", str(tree), "origin/main", cwd=repo)
+        doc = tree / "docs" / "plans" / "x-requirements.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text(PLAN_TEXT, encoding="utf-8")
+        git("add", ".", cwd=tree)
+        git("commit", "-qm", "requirements", cwd=tree)
+        self.worker.update(entry_command="ce-brainstorm", worktree_path=str(tree), branch="issue/7")
+        self.ops.git = adapters.git
+        final = "Saved docs/plans/x-requirements.md."
+        self.records = records_with_final(final)
+        self.assertEqual(self.verify()["state"], "done")  # git shows the branch's commit
+        git("push", "-q", "origin", "HEAD:main", cwd=tree)  # merged
+        git("fetch", "-q", "origin", cwd=tree)
+        self.assertEqual(self.verify()["state"], "ended_without_proof")  # git alone no longer can
+        # The run's transcript shows the write (producer shape: norm #330, Claude Code 2.1.304).
+        self.records = [*self.wrote(doc), *records_with_final(final)]
+        self.assertEqual(self.verify()["state"], "done")
+        # Rebased onto a main that changed another file: that file is not the worker's.
+        (repo / "upstream.md").write_text("upstream", encoding="utf-8")
+        git("pull", "-q", "--ff-only", "origin", "main", cwd=repo)
+        git("add", "upstream.md", cwd=repo)
+        git("commit", "-qm", "upstream", cwd=repo)
+        git("push", "-q", "origin", "HEAD:main", cwd=repo)
+        git("fetch", "-q", "origin", cwd=tree)
+        git("rebase", "-q", "origin/main", cwd=tree)
+        self.records = [*self.wrote(doc), *records_with_final("Followed upstream.md.")]
+        self.assertEqual(self.verify()["state"], "ended_without_proof")
+
+    def wrote(self, path, *, failed=False, tool="Write", wire=False):
+        use = {"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_write", "name": tool,
+             "input": {"notebook_path" if tool == "NotebookEdit" else "file_path": str(path), "content": "x"}}]}}
+        result = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": [
+            {"tool_use_id": "toolu_write", "type": "tool_result",
+             "content": f"File created successfully at: {path}"} | ({"is_error": True} if failed else {})]}}
+        if wire:
+            use, result = dict(use, type="api-request-blob"), dict(result, type="api-request-blob")
+        return [use, result]
+
+    def unidentified(self, path):
+        use, result = self.wrote(path)
+        del use["message"]["content"][0]["id"]
+        del result["message"]["content"][0]["tool_use_id"]
+        return [use, result]
+
+    def test_brainstorm_transcript_write_decision_table(self):
+        self.worker["entry_command"] = "ce-brainstorm"
+        doc = self.artifact()
+        other = self.artifact("docs/plans/other-requirements.md")
+        self.worker_wrote()  # git shows nothing, so only the transcript can prove it
+        final = records_with_final("Saved docs/plans/x-requirements.md.")
+        for records, expected in (
+            ([*self.wrote(doc), *final], "done"),
+            ([*self.wrote(doc, tool="Edit"), *final], "done"),
+            ([*self.wrote(doc, tool="MultiEdit"), *final], "done"),
+            ([*self.wrote("docs/plans/x-requirements.md"), *final], "done"),  # relative path
+            ([*self.wrote(doc, failed=True), *final], "ended_without_proof"),
+            ([*self.wrote(doc, tool="Read"), *final], "ended_without_proof"),      # read, not written
+            ([*self.unidentified(doc), *final], "ended_without_proof"),           # no ids to pair
+            ([*self.wrote(other), *final], "ended_without_proof"),                 # a different file
+            ([*self.wrote(doc, wire=True), *final], "ended_without_proof"),        # wire copies only
+            ([self.wrote(doc)[0], *final], "ended_without_proof"),                 # no result yet
+            (final, "ended_without_proof"),
+        ):
+            with self.subTest(index=len(records), first=records[0].get("type"), expected=expected):
+                self.records = records
+                self.assertEqual(self.verify()["state"], expected)
 
     def test_cleanup_unlinks_a_node_modules_junction_before_real_git_removes_the_tree(self):
         # Live 2026-10-15: the worktree's node_modules was a junction to the main
@@ -690,9 +987,46 @@ class FinishTest(unittest.TestCase):
                     self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
                     self.assertEqual([(call[0], call[1][:2]) for call in self.ops.calls[1:]], [
                         ("herdr", ("agent", "get")), ("git", ("status", "--porcelain")),
+                        ("herdr", ("agent", "get")),  # still idle just before the close
                         ("herdr", ("workspace", "close")), ("herdr", ("worktree", "remove")),
                     ])
                     self.assertEqual(self.ops.calls[2][2]["cwd"], str(self.worktree))
+
+    def test_cleanup_abandon_closes_a_failed_starts_idle_session(self):
+        # boon-town #2422: the session a failed start left open could not be closed by any command.
+        self.worker.update(state="start_failed", abandoned=True)
+        self.ops.prs = AssertionError("abandoned worker must not query GitHub")
+        for status, cleaned in (("idle", True), ("working", False)):
+            with self.subTest(status=status):
+                self.ops.agent = self.alive(status)
+                self.assertEqual(finish.cleanup(self.worker, ops=self.ops)["cleaned"], cleaned)
+        self.ops.agent = self.alive("idle")
+        self.ops.git_status = adapters.CommandResult(True, 0, " M notes.md\n", "")
+        self.assertIn("uncommitted changes", finish.cleanup(self.worker, ops=self.ops)["reason"])
+        # Not abandoned: a failed start has no PR, so a merged PR never closes its session.
+        self.ops.git_status = success()
+        self.worker.update(abandoned=False, pr=12, merged_pr_named=True)
+        self.ops.pr_view = success(pr(state="MERGED", number=12))
+        self.assertIn("abandons", finish.cleanup(self.worker, ops=self.ops)["reason"])
+        self.assertNotIn("start_failed", finish.MERGE_MARKABLE_STATES)
+
+    def test_cleanup_refuses_an_agent_that_starts_working_during_the_checks(self):
+        # Codex review, 2026-10-20: a failed start's delayed entry can arrive while the worktree is
+        # checked; closing on the earlier idle reading would end a working session.
+        self.worker.update(state="start_failed", abandoned=True)
+        readings = [self.alive("idle"), self.alive("working")]
+        herdr = self.ops.herdr
+
+        def changing(*args, **kwargs):
+            if args[:2] == ("agent", "get"):
+                self.ops.agent = readings.pop(0)
+            return herdr(*args, **kwargs)
+
+        self.ops.herdr = changing
+        result = finish.cleanup(self.worker, ops=self.ops)
+        self.assertFalse(result["cleaned"])
+        self.assertIn("became working", result["reason"])
+        self.assertFalse([c for c in self.ops.calls if c[1][:2] in {("workspace", "close"), ("worktree", "remove")}])
 
     def test_cleanup_never_closes_a_busy_agent_dirty_tree_or_unfinished_worker(self):
         self.ops.prs = success([pr(state="MERGED")])

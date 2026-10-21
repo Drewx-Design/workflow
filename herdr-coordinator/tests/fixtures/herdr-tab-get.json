@@ -1,0 +1,15 @@
+{
+  "id": "cli:tab:get",
+  "result": {
+    "tab": {
+      "agent_status": "working",
+      "focused": false,
+      "label": "herdr",
+      "number": 89,
+      "pane_count": 1,
+      "tab_id": "w2:t2S",
+      "workspace_id": "w2"
+    },
+    "type": "tab_info"
+  }
+}

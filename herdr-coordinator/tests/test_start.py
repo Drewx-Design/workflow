@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+    __import__("os").environ.pop(key, None)  # a suite run inside herdr must not resolve a real lane
 
 import copy
 import io
@@ -27,6 +29,29 @@ def success(data=None):
 
 def failure(code):
     return adapters.CommandResult(False, 1, "", "", None, code, code)
+
+
+def herdr_identity(*args, timeout=None):
+    """Fixture-backed ownership reads; reject every other external operation."""
+    assert timeout is not None and 0 < timeout <= 5
+    assert args[:2] in {("tab", "get"), ("pane", "get"), ("tab", "list"), ("pane", "list")}, args
+    entity, operation = args[:2]
+    caller = json.loads((FIXTURE.parent / f"herdr-{entity}-get.json").read_text(encoding="utf-8"))
+    record = caller["result"][entity]
+    if operation == "get":
+        assert args == (entity, "get", record[f"{entity}_id"]), args
+        return success(caller)
+    assert args == (entity, "list"), args
+    data = json.loads((FIXTURE.parent / f"herdr-{entity}-list-global.json").read_text(encoding="utf-8"))
+    data["result"][entity + "s"].append(record)
+    return success(data)
+
+
+def herdr_identity_command():
+    return [sys.executable, "-c", "import json, sys; sys.path.insert(0, sys.argv[1]); "
+            "from test_start import herdr_identity; "
+            "print(json.dumps(herdr_identity(*sys.argv[2:], timeout=5).data))",
+            str(Path(__file__).resolve().parent)]
 
 
 class FakeOps:
@@ -77,6 +102,8 @@ class FakeOps:
 
     def herdr(self, *args, **kwargs):
         self.calls.append(("herdr", args, kwargs))
+        if args[:2] in {("tab", "get"), ("pane", "get"), ("tab", "list"), ("pane", "list")}:
+            return herdr_identity(*args, **kwargs)
         if args[:2] == ("worktree", "create"):
             if self.worktree_error:
                 return failure(self.worktree_error)
@@ -176,7 +203,10 @@ class StartTests(unittest.TestCase):
         self.repo = self.root / "repo with spaces"
         self.repo.mkdir()
         self.projects = self.root / "projects"
-        patcher = mock.patch.dict(os.environ, {"HERDR_COORD_HOME": str(self.root / "state")})
+        environment = dict(os.environ, HERDR_COORD_HOME=str(self.root / "state"))
+        for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+            environment.pop(key, None)
+        patcher = mock.patch.dict(os.environ, environment, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
         for name, value in {
@@ -189,6 +219,9 @@ class StartTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.ops = FakeOps(self.projects)
+        identity = mock.patch.object(adapters, "herdr", side_effect=herdr_identity)
+        identity.start()
+        self.addCleanup(identity.stop)
 
     def workers(self):
         return list(registry.load()["workers"].values())
@@ -270,11 +303,164 @@ class StartTests(unittest.TestCase):
     def test_cli_restart_dispatches_and_reports_refusal(self):
         with mock.patch.object(start, "restart", return_value={"state": "running"}) as restart, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
             self.assertEqual(herdr_coord.main(["restart", "#1"]), 0)
-            restart.assert_called_once_with("#1")
+            restart.assert_called_once_with("#1", lane="main")
             self.assertEqual(json.loads(output.getvalue()), {"state": "running"})
         with mock.patch.object(start, "restart", side_effect=ValueError("hold is open")), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
             self.assertEqual(herdr_coord.main(["restart", "issue-1-agent"]), 1)
             self.assertEqual(json.loads(output.getvalue())["state"], "refused")
+
+    def test_cli_start_and_restart_pass_the_resolved_lane(self):
+        context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1", "workspace_id": "w1",
+                   "controller": {"agent": "claude", "kind": "id", "value": "coordinator-session"},
+                   "source": "tab label"}
+        for command, argv, expected in (
+            ("start_issues", ["start", str(self.repo), "12"], (str(self.repo), [12])),
+            ("restart", ["restart", "#12"], ("#12",)),
+        ):
+            with self.subTest(command=command), \
+                    mock.patch.object(herdr_coord.lanes, "resolve_context", return_value=context), \
+                    mock.patch.object(start, command, return_value=[] if command == "start_issues" else {}) as run, \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(herdr_coord.main(argv), 0)
+            run.assert_called_once_with(*expected, lane="seo")
+
+    def test_start_stores_lane_and_labels_both_workspace_creation_paths(self):
+        for index, (lane, fallback) in enumerate((("seo", False), ("main", False),
+                                                 ("seo", True), ("main", True))):
+            with self.subTest(lane=lane, fallback=fallback), mock.patch.dict(os.environ, {
+                    "HERDR_COORD_HOME": str(self.root / f"labels-{index}")}):
+                repo = self.root / str(index) / "boon-town"
+                repo.mkdir(parents=True)
+                self.ops.issue(12)
+                self.ops.worktree_error = "unknown_command" if fallback else None
+                worker = start.start_issues(repo, [12], lane=lane, ops=self.ops)[0]
+                self.assertEqual(worker["state"], "running", worker)
+                self.assertEqual(worker["lane"], lane)
+                self.assertEqual(self.workers()[0]["lane"], lane)
+                command = ("workspace", "create") if fallback else ("worktree", "create")
+                workspace = next(args for kind, args, _ in reversed(self.ops.calls)
+                                 if kind == "herdr" and args[:2] == command)
+                self.assertEqual(workspace[workspace.index("--label") + 1],
+                                 "boon-town #12" if lane == "main" else "boon-town seo #12")
+                events = registry.read_events(0, lane=None)
+                self.assertEqual(events[0]["kind"], "worker_starting")
+                self.assertTrue(all(event["lanes"] == [lane] for event in events))
+
+    def test_start_refuses_workers_and_queued_issues_owned_by_another_lane(self):
+        self.ops.issue(12)
+        for cap in (0, 1):
+            with self.subTest(cap=cap), mock.patch.dict(os.environ, {
+                    "HERDR_COORD_HOME": str(self.root / f"ownership-{cap}")}), \
+                    mock.patch.object(start, "_run_worker", side_effect=lambda worker, ops: worker):
+                registry.update(lambda doc: doc["config"].update(cap=cap))
+                original = start.start_issues(self.repo, [12], lane="main", ops=self.ops)[0]
+                before = registry.load()
+                refused = start.start_issues(self.repo, [12], lane="seo", ops=self.ops)[0]
+                self.assertEqual(refused["state"], "refused", refused)
+                self.assertIn("lane main", refused["reason"])
+                self.assertEqual(registry.load()["workers"], before["workers"])
+                self.assertEqual(registry.load()["queue"], before["queue"])
+                events = registry.read_events(before["event_seq"], lane=None)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["kind"], "issue_refused")
+                self.assertEqual(events[0]["lanes"], ["seo"])
+                self.assertEqual(events[0]["payload"], refused)
+                self.assertEqual(start.start_issues(self.repo, [12], lane="main", ops=self.ops)[0], original)
+                self.assertEqual(registry.read_events(before["event_seq"], lane=None), events)
+
+    def test_admission_checks_the_current_owner_under_lock(self):
+        self.ops.issue(12)
+        with mock.patch.object(start, "_run_worker", side_effect=lambda worker, ops: worker):
+            worker = start.start_issues(self.repo, [12], ops=self.ops)[0]
+        admit = start._admit
+
+        def move_before_admit(candidate):
+            registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(lane="seo"))
+            return admit(candidate)
+
+        with mock.patch.object(start, "_admit", side_effect=move_before_admit):
+            refused = start.start_issues(self.repo, [12], ops=self.ops)[0]
+        self.assertEqual(refused["state"], "refused", refused)
+        self.assertIn("lane seo", refused["reason"])
+        self.assertEqual(self.workers()[0]["lane"], "seo")
+        self.assertEqual(registry.read_events(0, lane=None)[-1]["lanes"], ["main"])
+
+    def test_queued_issue_and_watcher_claim_keep_the_admitted_lane(self):
+        registry.update(lambda doc: doc["config"].update(cap=1))
+        self.ops.issue(1)
+        self.ops.issue(12)
+        main = start.start_issues(self.repo, [1], ops=self.ops)[0]
+        queued = start.start_issues(self.repo, [12], lane="seo", ops=self.ops)[0]
+        self.assertEqual((queued["state"], queued["lane"]), ("queued", "seo"))
+        self.assertEqual(registry.load()["queue"], [queued])
+        self.assertEqual(start.start_issues(self.repo, [12], lane="seo", ops=self.ops)[0], queued)
+        self.assertIsNone(start.start_next_queued(ops=self.ops))
+        registry.update(lambda doc: doc["workers"][main["worker_id"]].update(state="done"))
+        worker = start.start_next_queued(ops=self.ops)
+        self.assertEqual((worker["issue"], worker["state"], worker["lane"]), (12, "running", "seo"))
+        self.assertEqual(registry.load()["queue"], [])
+        events = [event for event in registry.read_events(0, lane=None)
+                  if event["payload"].get("worker_id") == worker["worker_id"]]
+        self.assertEqual(sum(event["kind"] == "issue_queued" for event in events), 1)
+        self.assertEqual(sum(event["kind"] == "worker_starting" for event in events), 1)
+        self.assertTrue(all(event["lanes"] == ["seo"] for event in events), events)
+        self.assertIsNone(start.start_next_queued(ops=self.ops))
+
+    def test_admission_and_queue_claim_events_survive_a_crash_after_commit(self):
+        for index, (cap, from_queue, kind) in enumerate((
+            (0, False, "issue_queued"), (1, False, "worker_starting"),
+            (1, True, "worker_starting"),
+        )):
+            with self.subTest(cap=cap, from_queue=from_queue), mock.patch.dict(os.environ, {
+                    "HERDR_COORD_HOME": str(self.root / f"crash-{index}")}):
+                candidate = {"worker_id": "repo#12", "issue": 12, "repo_path": str(self.repo), "lane": "seo"}
+                registry.create_lane("seo")
+                registry.update(lambda doc: doc["config"].update(cap=cap))
+                if from_queue:
+                    registry.update(lambda doc: doc["queue"].append({**candidate, "state": "queued"}))
+                save = registry.save
+
+                def crash_after_save(doc):
+                    save(doc)
+                    raise RuntimeError("crash after admission commit")
+
+                with mock.patch.object(registry, "save", side_effect=crash_after_save):
+                    with self.assertRaisesRegex(RuntimeError, "crash after admission commit"):
+                        if from_queue:
+                            start.start_next_queued(ops=self.ops)
+                        else:
+                            start._admit(candidate)
+                doc = registry.load()
+                worker = doc["queue"][0] if cap == 0 else doc["workers"][candidate["worker_id"]]
+                self.assertEqual(worker["lane"], "seo")
+                self.assertEqual(worker["state"], "queued" if cap == 0 else "starting")
+                events = registry.read_events(0, lane=None)
+                self.assertEqual([event["kind"] for event in events], [kind])
+                self.assertEqual(events[0]["payload"], worker)
+                self.assertEqual(events[0]["lanes"], ["seo"])
+                self.assertEqual(registry.read_events(0, lane=None), events)
+                self.assertEqual(self.ops.calls, [])
+
+    def test_issue_refused_routes_to_the_caller_lane(self):
+        self.ops.issue(12, [])
+        refused = start.start_issues(self.repo, [12], lane="seo", ops=self.ops)[0]
+        self.assertEqual(refused["state"], "refused")
+        event, = registry.read_events(0, lane=None)
+        self.assertEqual(event["kind"], "issue_refused")
+        self.assertEqual(event["payload"], refused)
+        self.assertEqual(event["lanes"], ["seo"])
+
+    def test_restart_checks_lane_ownership_before_claiming(self):
+        self.ops.issue(12)
+        with mock.patch.object(start, "_run_worker", side_effect=lambda worker, ops: worker):
+            worker = start.start_issues(self.repo, [12], ops=self.ops)[0]
+        registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(state="start_interrupted"))
+        before = registry.load()
+        with self.assertRaisesRegex(ValueError, "lane main"):
+            start.restart("12", lane="seo", ops=self.ops)
+        self.assertEqual(registry.load(), before)
+        restarted = start.restart("12", lane="main", ops=self.ops)
+        self.assertEqual((restarted["state"], restarted["lane"]), ("running", "main"))
 
     def test_three_labelled_issues_start_with_resources_and_explicit_options(self):
         for number, label in enumerate(["ce:work", "ce:debug", "ce:lfg"], 1):
@@ -861,7 +1047,8 @@ class StartTests(unittest.TestCase):
             pr=42, transcript_offset=999, reason="old reason"))
         Path(old["worktree_path"]).rmdir()  # Simulate the completed cleanup in this fixture.
         self.ops.issue(1, ["ce:debug"], "CE entry: /ce-debug #1 new task")
-        fresh = start.start_issues(self.repo, [1, 1], ops=self.ops)[0]
+        fresh = start.start_issues(self.repo, [1, 1], lane="seo", ops=self.ops)[0]
+        self.assertEqual(fresh["lane"], "seo")
         self.assertEqual(fresh["state"], "running")
         self.assertEqual(fresh["entry_command"], "ce-debug")
         self.assertNotEqual(fresh["action_id"], old["action_id"])
@@ -909,13 +1096,45 @@ class StartTests(unittest.TestCase):
         self.ops.issue(2, [])
         output = io.StringIO()
         real_start = start.start_issues
-        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues: real_start(repo, issues, ops=self.ops)), mock.patch("sys.stdout", output):
+        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane: real_start(repo, issues, lane=lane, ops=self.ops)), mock.patch("sys.stdout", output):
             self.assertEqual(herdr_coord.main(["start", str(self.repo), "1", "#2"]), 0)
         summaries = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([item["state"] for item in summaries], ["running", "refused"])
         with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit) as caught:
             herdr_coord.main(["start", str(self.repo), "bad"])
         self.assertEqual(caught.exception.code, 2)
+
+    def test_cli_reports_each_issue_when_start_stops_part_way(self):
+        # Live 2026-10-19 (norm): an error while starting #331 was printed as start_failed for all
+        # four issues, though three had started.
+        for number in (1, 2, 3, 4):
+            self.ops.issue(number)
+        original_run = start._run_worker
+
+        def fail_third(worker, ops, **kwargs):
+            if worker["issue"] == 3:
+                start._record(worker["worker_id"], "worker_state", state="start_interrupted")
+                raise PermissionError(32, "The process cannot access the file")
+            return original_run(worker, ops, **kwargs)
+
+        output = io.StringIO()
+        real_start = start.start_issues
+        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane: real_start(repo, issues, lane=lane, ops=self.ops)), \
+                mock.patch.object(start, "_run_worker", side_effect=fail_third), mock.patch("sys.stdout", output):
+            self.assertEqual(herdr_coord.main(["start", str(self.repo), "1", "#2", "3", "4"]), 0)
+        summaries = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([(item["issue"], item["state"]) for item in summaries],
+                         [(1, "running"), (2, "running"), (3, "start_interrupted"), (4, "not_attempted")])
+        self.assertIn("cannot access", summaries[2]["reason"])
+        self.assertTrue(summaries[2]["worker_state_recorded"])
+        self.assertIn("issue 3", summaries[3]["reason"])
+        # An error before the issue has a registry entry reports start_error, not a guessed state.
+        with mock.patch.object(start, "_start_issue", side_effect=RuntimeError("gh exploded")):
+            with self.assertRaises(RuntimeError) as caught:
+                start.start_issues(self.repo, ["9"], ops=self.ops)
+        self.assertEqual(caught.exception.start_summaries,
+                         [{"issue": "9", "repo_path": str(Path(self.repo).resolve()), "state": "start_error",
+                           "reason": "gh exploded"}])
 
 
 if __name__ == "__main__":

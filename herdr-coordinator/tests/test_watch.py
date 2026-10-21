@@ -1,19 +1,24 @@
 import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "scripts"))
+for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+    __import__("os").environ.pop(key, None)  # a suite run inside herdr must not resolve a real lane
 
 import copy
 import io
+import itertools
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 import actions
 import finish
 import herdr_coord
+import lanes
 import registry
 import start
 import transcript
@@ -22,11 +27,19 @@ import test_actions as fixtures
 from test_actions import FakeOps, FIXTURES, PROMPT, END, TOOL, RESULT, ASK, ANSWER, QUOTA
 from test_start import FakeOps as StartOps
 from test_finish import FakeOps as FinishOps, failure, pr, success
+from test_lanes import FakeOps as LaneOps
 from test_transcript import background_pair, background_notification
 
 
 class WatchTests(unittest.TestCase):
-    setUp = fixtures.ActionTests.setUp
+    def setUp(self):
+        fixtures.ActionTests.setUp(self)
+        snapshot = mock.patch.object(lanes, "read_snapshot", return_value={
+            "tab_ids": {"w1:t1"}, "controller_counts": {"coordinator-session": 1}})
+        self.read_snapshot = lanes.read_snapshot
+        self.snapshot = snapshot.start()
+        self.addCleanup(snapshot.stop)
+
     add_worker = fixtures.ActionTests.add_worker
     set_state = fixtures.ActionTests.set_state
 
@@ -72,7 +85,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(action["worker_id"], "worker")
         self.assertEqual(action["status"], "delivered")
         self.assertEqual(self.ops.sends, [("agent", "send-keys", name, "3"),
-                                         ("pane", "send-text", "pane-1", "A"),
+                                     ("pane", "send-text", fixtures.AGENTS["blocked"]["pane_id"], "A"),
                                          ("agent", "send-keys", name, "enter")])
 
     def test_worker_problem_notifications_name_registered_repository(self):
@@ -83,7 +96,7 @@ class WatchTests(unittest.TestCase):
                 watch._report_problem(worker, kind, kind=kind)
                 watch._notify_events(self.ops)
                 self.assertEqual(self.ops.notifications[-1][2],
-                                 f"{Path(worker['repo_path']).name} #{worker['issue']}: {title}")
+                                 f"main: {Path(worker['repo_path']).name} #{worker['issue']}: {title}")
 
     def test_worker_state_notifications_name_payload_repository(self):
         for state in ("question", "start_failed", "start_interrupted", "ended_without_proof",
@@ -93,7 +106,7 @@ class WatchTests(unittest.TestCase):
                          "payload": {"repo_path": str(Path(self.temp.name) / "taste-swipe"),
                                      "issue": 21, "state": state}}
                 title, _ = watch._notification(event)
-                self.assertEqual(title, f"taste-swipe #21: {state}")
+                self.assertEqual(title, f"main: taste-swipe #21: {state}")
 
     def test_watcher_level_notifications_name_resolved_repository(self):
         repo = str(Path(self.temp.name) / "boon-town")
@@ -110,7 +123,7 @@ class WatchTests(unittest.TestCase):
             self.assertEqual(watch._notification(events[0])[0], "Coordinator watcher lost")
             title, _ = watch._notification({"kind": "worker_state",
                                             "payload": {"issue": 21, "state": "question"}})
-        self.assertEqual(title, "Issue #21: question")
+        self.assertEqual(title, "main: Issue #21: question")
 
     def test_blocked_producer_fixture_reports_question(self):
         payload = json.loads((FIXTURES / "herdr-agent-get-blocked-question.json").read_bytes())
@@ -130,7 +143,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(len(questions), 1)
         self.assertIn("Probe question", questions[0]["payload"]["question_text"])
         self.assertEqual(self.ops.notifications[0][2],
-                         f"{Path(self.worker['repo_path']).name} #{self.worker['issue']}: question")
+                         f"main: {Path(self.worker['repo_path']).name} #{self.worker['issue']}: question")
         self.assertIn("Probe question", self.ops.notifications[0][4])
         self.assertFalse(self.ops.sends)
 
@@ -232,6 +245,7 @@ class WatchTests(unittest.TestCase):
             events = watch.poll_once(ops=self.ops, now=100)
             self.assertEqual([event["payload"]["state"] for event in events
                               if event["kind"] == "worker_state"], ["waiting_background"])
+            registry.ack(registry.load()["event_seq"])
             for now in (1200, 3599):
                 watch._TRANSCRIPTS.clear()  # A restart must preserve the open launch and growth age.
                 self.assertEqual(watch.poll_once(ops=self.ops, now=now), [])
@@ -246,6 +260,93 @@ class WatchTests(unittest.TestCase):
         self.assertFalse(self.ops.sends)
         self.assertFalse(any(event["payload"].get("state") == "ended_without_proof"
                              for event in registry.read_events(0)))
+
+    end_ids = itertools.count()
+
+    def end_saying(self, *texts):
+        record = copy.deepcopy(END)
+        record["message"]["content"] = [{"type": "text", "text": text} for text in texts]
+        record["uuid"] = f"end-{next(self.end_ids)}"  # real records each carry their own uuid
+        return record
+
+    def background_events(self, since):
+        return [event["payload"] for event in registry.read_events(since)
+                if event["kind"] == "worker_state" and event["payload"].get("state") == "waiting_background"]
+
+    def test_background_wait_carries_a_question_the_turn_ended_on(self):
+        # norm #339: a brainstorm worker asked the user a question in plain text while its own background
+        # shell still ran; the wait hid the question for up to six hours.
+        question = "Ranking question, re-posed: A or B? The rest of the brainstorm waits on your answer."
+        launch, result = background_pair("Bash")
+        registry.update(lambda doc: doc["workers"]["worker"].update(final_message="An earlier turn's report."))
+        self.seed_records([PROMPT, self.end_saying("Earlier turn."), PROMPT, launch, result,
+                           self.end_saying(question)])
+        watch.poll_once(ops=self.ops, now=100)
+        (event,) = self.background_events(0)
+        self.assertEqual(event["final_message"], question)
+        self.assertEqual(actions.worker_named("worker")["final_message"], question)
+        self.assertNotIn("question_text", event)
+        self.assertFalse(self.ops.verify_calls)
+        self.assertFalse(self.ops.sends)
+
+        # No growth, same turn: reported once.
+        seq = max(event["seq"] for event in registry.read_events(0))
+        watch.poll_once(ops=self.ops, now=160)
+        self.assertEqual(self.background_events(seq), [])
+
+        # the user's answer is relayed; the next turn ends in the same wait with a new question.
+        follow_up = "Thanks. One more: keep the old ranking as a fallback?"
+        self.ops.write("session-1", [PROMPT, self.end_saying(follow_up)], append=True)
+        watch.poll_once(ops=self.ops, now=220)
+        (second,) = self.background_events(seq)
+        self.assertEqual(second["final_message"], follow_up)
+        self.assertNotEqual(second["state_token"], event["state_token"])
+        self.assertEqual(actions.worker_named("worker")["state"], "waiting_background")
+        with self.assertRaisesRegex(actions.ActionError, "Stale relay"):
+            actions.relay("worker", "Yes", state_token=event["state_token"], ops=self.ops)
+
+    def test_background_wait_reads_the_question_behind_an_untaken_notice(self):
+        # Two background jobs: one finishes after the question, and the idle worker never takes up
+        # its notice. The classifier drops that notice; the final text must come from the same turn.
+        question = "Which ranking should the brainstorm keep?"
+        first, first_result = background_pair("Bash")
+        second, second_result = background_pair("Agent")
+        self.ops.statuses["worker"] = "done"
+        notice = background_notification(first["message"]["content"][0]["id"])
+        self.seed_records([PROMPT, first, first_result, second, second_result, self.end_saying(question), notice])
+        watch.poll_once(ops=self.ops, now=100)
+        (event,) = self.background_events(0)
+        self.assertEqual(event["final_message"], question)
+
+    def test_background_wait_does_not_repeat_an_answered_question(self):
+        # A relay moves the worker on before its prompt reaches the transcript; re-reading the old
+        # turn must not publish the question the user already answered.
+        launch, result = background_pair("Bash")
+        self.seed_records([PROMPT, launch, result, self.end_saying("A or B?")])
+        watch.poll_once(ops=self.ops, now=100)
+        (event,) = self.background_events(0)
+        actions.change_worker("worker", "running", now=101, expected="waiting_background")
+        seq = max(item["seq"] for item in registry.read_events(0))
+        watch.poll_once(ops=self.ops, now=102)
+        (again,) = self.background_events(seq)
+        self.assertNotIn("final_message", again)
+        self.assertNotEqual(again["state_token"], event["state_token"])
+        self.assertNotIn("final_message", actions.worker_named("worker"))
+        # A stall that follows must not carry the answered question into the user's alert.
+        actions.change_worker("worker", "stalled", now=103, expected="waiting_background")
+        stalled = [item for item in registry.read_events(seq) if item["payload"].get("state") == "stalled"]
+        self.assertNotIn("A or B?", watch._notification(stalled[0])[1])
+        self.assertNotIn("final_message", stalled[0]["payload"])
+
+    def test_background_wait_never_reuses_an_earlier_turns_text(self):
+        launch, result = background_pair("Bash")
+        registry.update(lambda doc: doc["workers"]["worker"].update(final_message="Stale report."))
+        self.seed_records([PROMPT, self.end_saying("Earlier turn's question?"), PROMPT, launch, result,
+                           self.end_saying()])
+        watch.poll_once(ops=self.ops, now=100)
+        (event,) = self.background_events(0)
+        self.assertNotIn("final_message", event)
+        self.assertNotIn("final_message", actions.worker_named("worker"))
 
     def test_background_notification_and_assistant_activity_resume_normal_polling(self):
         launch, result = background_pair("Agent")
@@ -272,6 +373,7 @@ class WatchTests(unittest.TestCase):
         self.ops.statuses["worker"] = "done"
         self.seed_records([PROMPT, *background_pair("Bash")])
         watch.poll_once(ops=self.ops, now=120)
+        registry.ack(registry.load()["event_seq"])
         self.assertEqual(actions.worker_named("worker")["state"], "waiting_background")
         self.assertEqual(watch.poll_once(ops=self.ops, now=3599), [])
         self.assertFalse(self.ops.verify_calls)
@@ -284,12 +386,69 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(len(self.ops.notifications), 1)
         self.assertFalse(self.ops.sends)
 
+    def background_wait(self):
+        registry.update(lambda doc: doc["workers"]["worker"].pop("expired_background", None))
+        self.set_state("running")
+        self.ops.verify_calls.clear()
+        self.ops.statuses["worker"] = "done"
+        self.seed_records([PROMPT, *background_pair("Bash")])
+        watch._TRANSCRIPTS.clear()
+        watch.poll_once(ops=self.ops, now=120)
+        registry.ack(registry.load()["event_seq"])
+        self.assertEqual(actions.worker_named("worker")["state"], "waiting_background")
+
+    def test_background_wait_extends_while_the_pane_footer_counts_live_shells(self):
+        # Live 2026-10-19 (taste-swipe #48): an hours-long background build ended the worker every hour.
+        self.background_wait()
+        self.ops.visible = (FIXTURES / "herdr-agent-read-visible.txt").read_text(encoding="utf-8")
+        # Live footer of a working norm worker, 2026-10-19.
+        live = "─" * 40 + "\n  ⏵⏵ auto mode on · 2 shells · /tasks to see subagents · ← 1 agent · ↓ to manage"
+        self.assertTrue(watch._pane_shows_background_shells(self.worker, mock.Mock(
+            herdr=lambda *args, **kwargs: fixtures.adapters.CommandResult(True, 0, live, ""))))
+        for now, status in ((3600, "done"), (7200, "idle"), (watch.BACKGROUND_LIVE_MAX_SECONDS - 1, "idle")):
+            self.ops.statuses["worker"] = status  # herdr flips a viewed pane to idle
+            self.assertEqual(watch.poll_once(ops=self.ops, now=now), [])
+        self.assertEqual(actions.worker_named("worker")["state"], "waiting_background")
+        self.assertFalse(self.ops.verify_calls)
+        # The cap still ends the wait while the footer claims live work.
+        events = watch.poll_once(ops=self.ops, now=watch.BACKGROUND_LIVE_MAX_SECONDS)
+        self.assertEqual([event["payload"]["state"] for event in events
+                          if event["kind"] == "worker_state"], ["ended_without_proof"])
+        self.assertFalse(self.ops.sends)
+
+    def test_background_wait_ends_at_timeout_when_the_footer_shows_no_live_shells(self):
+        for screen in ("", "  ⏵⏵ auto mode on · esc to interrupt",
+                       "  ⏵⏵ auto mode on · 0 shells · ↓ to manage",
+                       "● Running 2 shells · 4m\n❯\n  ⏵⏵ auto mode on",
+                       # Counts above the footer are earlier output, not the pane's live jobs.
+                       "  Earlier: auto mode on · 2 shells · 1 agent\n❯\n  ⏵⏵ auto mode on · esc to interrupt",
+                       # Live footers of idle workers, 2026-10-19: "← 1 agent" is on every pane.
+                       "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent",
+                       "  ⏵⏵ auto mode on (shift+tab to cycle) · ⧉ 2 · ← 1 agent · 1 feedback draft"):
+            with self.subTest(screen=screen):
+                self.background_wait()
+                self.ops.visible = screen
+                events = watch.poll_once(ops=self.ops, now=3600)
+                self.assertEqual([event["payload"]["state"] for event in events
+                                  if event["kind"] == "worker_state"], ["ended_without_proof"])
+                self.assertEqual(len(self.ops.verify_calls), 1)
+
+    def test_background_wait_does_not_read_the_pane_before_its_timeout(self):
+        self.ops.statuses["worker"] = "done"
+        self.seed_records([PROMPT, *background_pair("Bash")])
+        watch.poll_once(ops=self.ops, now=120)
+        registry.ack(registry.load()["event_seq"])
+        with mock.patch.object(watch, "_pane_shows_background_shells") as footer:
+            self.assertEqual(watch.poll_once(ops=self.ops, now=3599), [])
+        footer.assert_not_called()
+
     def test_background_wait_survives_herdr_showing_the_pane_idle(self):
         # Live 2026-10-14 (taste-swipe #39): herdr flipped the viewed pane from done to idle, the
         # wait read as a stall, and the refused nudge was reported as delivery_unknown.
         self.ops.statuses["worker"] = "done"
         self.seed_records([PROMPT, *background_pair("Bash")])
         watch.poll_once(ops=self.ops, now=120)
+        registry.ack(registry.load()["event_seq"])
         self.assertEqual(actions.worker_named("worker")["state"], "waiting_background")
         self.ops.statuses["worker"] = "idle"
         for now in (200, 1500, 3599):  # idle reads as running before the stall age, stalled after it
@@ -347,16 +506,80 @@ class WatchTests(unittest.TestCase):
         self.assertNotIn("question_text", actions.worker_named("worker"))
         self.assertNotIn("question_text", registry.read_events(0)[-1]["payload"])
 
+    def test_brainstorm_that_moved_on_keeps_needing_a_pr_after_a_relay_trims_its_records(self):
+        # norm #330, 2026-10-20: the worker went from ce-brainstorm to ce-work, stopped mid-build naming
+        # a file it wrote, and was relayed a continue; the records after that relay hold no stage change.
+        plan = Path(self.temp.name) / "plans" / "x-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("---\nartifact_contract: ce-unified-plan/v1\nproduct_contract_source: ce-brainstorm\n---\n",
+                        encoding="utf-8")
+        stage = {"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_stage", "name": "Skill",
+             "input": {"skill": "compound-engineering:ce-work", "args": "plans/x-plan.md"}}]}}
+        launched = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": [
+            {"tool_use_id": "toolu_stage", "type": "tool_result", "content": "Launching skill: ce-work"}]}}
+        final = copy.deepcopy(END)
+        final["message"]["content"] = "U6 done; the plan is `plans/x-plan.md`. Next: U7."
+        self.set_state("running", entry_command="ce-brainstorm", reopen_action_id="relay-1")
+        registry.update(lambda doc: doc["actions"].update({"relay-1": {
+            "session_id": actions.worker_named("worker")["session_id"], "transcript_position": 3}}))
+        self.ops.verify_done = None  # Use the real finish verifier.
+        git = FinishOps()
+        git.git_status.stdout = "?? plans/x-plan.md"
+        git.prs = success([])
+        self.ops.git, self.ops.gh = git.git, git.gh
+        records = [PROMPT, stage, launched, PROMPT, final]
+        # Without the stage the trimmed records alone would prove the brainstorm.
+        self.assertEqual(finish.verify_done(actions.worker_named("worker"), ops=self.ops, config={}, now=120,
+                                            records=records[3:])["state"], "done")
+        watch._verify(actions.worker_named("worker"), records, self.ops, 120)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["state"], "ended_without_proof")
+        self.assertEqual(worker["detail"], "no open PR on the worker branch")
+        self.assertEqual(worker["advanced_stage"], "ce-work")
+        # Remembered: a later check whose records no longer show the stage still needs the PR.
+        self.set_state("running")
+        watch._verify(actions.worker_named("worker"), [PROMPT, final], self.ops, 130)
+        self.assertEqual(actions.worker_named("worker")["state"], "ended_without_proof")
+
+    def test_poll_records_a_move_on_to_build_before_the_session_changes(self):
+        # Review 2026-10-20: a stage seen only by the end-of-turn check is lost when the session
+        # changes first; the poll records it as soon as the transcript shows it.
+        stage = {"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_stage", "name": "Skill", "input": {"skill": "lfg", "args": ""}}]}}
+        launched = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": [
+            {"tool_use_id": "toolu_stage", "type": "tool_result", "content": "Launching skill: lfg"}]}}
+        for entry, expected in (("ce-brainstorm", "lfg"), ("/compound-engineering:ce-strategy", "lfg"),
+                                ("ce-work", None)):
+            with self.subTest(entry=entry):
+                self.set_state("running", entry_command=entry)
+                registry.update(lambda doc: doc["workers"]["worker"].pop("advanced_stage", None))
+                self.seed_records([PROMPT, TOOL, RESULT])
+                self.ops.write("session-1", [stage, launched], append=True)
+                watch.poll_once(ops=self.ops, now=100)
+                self.assertEqual(actions.worker_named("worker").get("advanced_stage"), expected)
+        # A watcher that stopped after saving the offset but before the stage still finds it.
+        self.set_state("running", entry_command="ce-brainstorm")
+        registry.update(lambda doc: doc["workers"]["worker"].pop("advanced_stage", None))
+        self.seed_records([PROMPT, stage, launched])  # already read: no growth on this poll
+        watch.poll_once(ops=self.ops, now=110)
+        self.assertEqual(actions.worker_named("worker").get("advanced_stage"), "lfg")
+
     def test_no_closing_record_cannot_finish_from_previous_turn_artifact(self):
-        artifact = Path(self.temp.name) / "previous.md"
-        artifact.write_text("Old requirements", encoding="utf-8")
+        artifact = Path(self.temp.name) / "plans" / "previous.md"
+        artifact.parent.mkdir()
+        artifact.write_text("---\nartifact_contract: ce-unified-plan/v1\nproduct_contract_source: ce-brainstorm\n---\n",
+                            encoding="utf-8")
         earlier = copy.deepcopy(END)
-        earlier["message"]["content"] = f"Requirements are in `{artifact.name}`."
+        earlier["message"]["content"] = "Requirements are in `plans/previous.md`."
         sidechain = copy.deepcopy(earlier)
         sidechain["isSidechain"] = True
         self.set_state("running", entry_command="ce-brainstorm")
         self.ops.statuses["worker"] = "done"
         self.ops.verify_done = None  # Use the real finish verifier.
+        git = FinishOps()
+        git.git_status.stdout = "?? plans/previous.md"  # the worker wrote it, in the earlier turn
+        self.ops.git = git.git
         self.seed_records([PROMPT, earlier, PROMPT, TOOL, RESULT, sidechain])
         self.assertEqual(finish.verify_done(self.worker | {"entry_command": "ce-brainstorm"},
                                            ops=self.ops, config={}, now=120,
@@ -653,7 +876,7 @@ class WatchTests(unittest.TestCase):
                         self.assertEqual(starter.call_count, int(event in {"queue", "start", "go-start"}))
                 self.assertEqual(registry.load()["workers"]["worker"]["state"], expected)
                 self.assertEqual(bool(self.ops.sends), event in {"stall", "quota-past", "relay", "relay-question", "resume"})
-                self.assertEqual(bool(self.ops.notifications), event in {"question", "done", "fail", "end", "probe-once", "probe-three", "absent"})
+                self.assertEqual(bool(self.ops.notifications), event in {"question", "done", "fail", "end", "probe-once", "probe-three", "absent", "down", "down-no-session"})
                 if event == "background":
                     self.assertEqual(start._slots(registry.load()), 1)
                     self.assertFalse(self.ops.verify_calls)
@@ -795,7 +1018,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual([e["payload"]["state"] for e in events if e["kind"] == "worker_state"], ["question"])
         self.assertEqual(registry.load()["workers"]["worker"]["state"], "question")
         self.assertEqual(len(self.ops.notifications), 1)
-        self.assertEqual(self.ops.notifications[0][2], f"{Path(self.worker['repo_path']).name} #21: question")
+        self.assertEqual(self.ops.notifications[0][2], f"main: {Path(self.worker['repo_path']).name} #21: question")
         self.assertIn("Probe question", self.ops.notifications[0][4])
         self.assertEqual(watch.poll_once(ops=self.ops, now=102), [])
         self.assertEqual(len(self.ops.notifications), 1)
@@ -961,7 +1184,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(sum(e["kind"] == "session_changed" for e in events), 1)
         self.assertEqual(len(self.ops.notifications), 1)
         self.assertEqual(self.ops.notifications[0][2],
-                         f"{Path(self.worker['repo_path']).name} #{self.worker['issue']}: Worker delivery unknown")
+                         f"main: {Path(self.worker['repo_path']).name} #{self.worker['issue']}: Worker delivery unknown")
         self.assertIn("worker", self.ops.notifications[0][4])
         self.assertIn("nudge", self.ops.notifications[0][4])
         self.assertEqual(sum(e["kind"] == "delivery_unknown" for e in registry.read_events(0)), 1)
@@ -1192,6 +1415,8 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(len(self.ops.sends), 1)
         self.assertFalse(self.ops.notifications)
         watch.poll_once(ops=self.ops, now=1202)  # Observe the newly recorded nudge.
+        registry.ack(registry.load()["event_seq"])
+        watch.poll_once(ops=self.ops, now=1203)  # Observe that the lane has handled its progress.
         watch.poll_once(ops=self.ops, now=2403)
         self.assertEqual(registry.load()["workers"]["worker"]["state"], "stalled")
         self.assertEqual(len(self.ops.sends), 1)
@@ -1335,6 +1560,209 @@ class WatchTests(unittest.TestCase):
         actions.relay("worker", "1", state_token="form-token", ops=self.ops)
         self.assertTrue(self.ops.sends)
 
+    def dismissed_records(self):
+        return [json.loads(line) for line in
+                (FIXTURES / "dismissed-multiselect-form.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def open_multiselect(self):
+        ask = self.dismissed_records()[0]
+        self.seed_records([PROMPT, ask])
+        self.set_state("question", state_token="form-token")
+        self.ops.statuses["worker"] = "blocked"
+        self.ops.visible = "\n".join([
+            "─" * 40, " Which sources should this first version cover?",
+            "❯ 1. [ ] Source A", "  2. [ ] Source B", "  3. [ ] Source C", "  4. [ ] Source D", "─" * 40])
+        return ask
+
+    def esc_closes_the_form(self, *, closes=True):
+        original = self.ops.herdr
+
+        def herdr(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("agent", "send-keys") and args[3] == "esc" and closes:
+                self.ops.write("session-1", self.dismissed_records()[1:], append=True)
+                self.ops.statuses["worker"] = "idle"
+            return result
+
+        self.ops.herdr = herdr
+
+    def test_relay_dismiss_form_closes_a_multiselect_form_then_prompts_the_answer(self):
+        # Live 2026-10-19 (norm #330): a multi-select form needed the user to press Esc by hand.
+        self.open_multiselect()
+        with self.assertRaisesRegex(actions.ActionError, "--dismiss-form"):
+            actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops)
+        self.assertFalse(self.ops.sends)
+        self.esc_closes_the_form()
+        action = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                               dismiss_form=True)
+        self.assertEqual(self.ops.sends, [("agent", "send-keys", "worker", "esc"),
+                                          ("agent", "prompt", "worker", "Sources A and C")])
+        self.assertEqual(action["status"], "delivered")
+        self.assertEqual(action["transport"], "dismiss")
+        self.assertEqual(action["steps_sent"], ["esc", "Sources A and C"])
+        self.assertEqual(actions.worker_named("worker")["state"], "running")
+        # A replay with the same token returns the recorded action and sends nothing more.
+        again = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                              dismiss_form=True)
+        self.assertEqual(again["id"], action["id"])
+        self.assertEqual(len(self.ops.sends), 2)
+
+    def test_relay_dismiss_form_that_stays_open_fails_without_sending_the_answer(self):
+        self.open_multiselect()
+        self.esc_closes_the_form(closes=False)
+        with mock.patch.object(actions, "DISMISS_TIMEOUT", 0.3):
+            action = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                                   dismiss_form=True)
+        self.assertEqual(self.ops.sends, [("agent", "send-keys", "worker", "esc")])
+        self.assertEqual(action["status"], "failed")
+        self.assertEqual(action["steps_sent"], ["esc"])
+        self.assertIn("did not close in time", action["reason"])
+        failed = [event["payload"] for event in registry.read_events(0) if event["kind"] == "delivery_failed"]
+        self.assertTrue(failed[-1]["partial"])
+        self.assertNotIn("pending_action_id", actions.worker_named("worker"))
+
+    def test_relay_dismiss_form_never_types_the_answer_into_a_new_session(self):
+        # Review 2026-10-19: a session that changed after Esc must not receive the old question's answer.
+        self.open_multiselect()
+        original = self.ops.herdr
+
+        def herdr(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[:2] == ("agent", "send-keys") and args[3] == "esc":
+                self.ops.sessions["worker"] = "session-2"
+                self.ops.write("session-2", [PROMPT])
+                self.ops.statuses["worker"] = "idle"
+            return result
+
+        self.ops.herdr = herdr
+        action = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                               dismiss_form=True)
+        self.assertEqual(self.ops.sends, [("agent", "send-keys", "worker", "esc")])
+        self.assertEqual(action["status"], "failed")
+        self.assertIn("session changed", action["reason"])
+
+    def test_relay_dismiss_form_bounds_each_read_by_its_deadline(self):
+        self.open_multiselect()
+        self.esc_closes_the_form()
+        original = self.ops.herdr
+        timeouts = []
+
+        def slow_get(*args, **kwargs):
+            if args[:2] == ("agent", "get") and self.ops.sends:
+                timeouts.append(kwargs["timeout"])
+                clock[0] += 20  # this read finished after the deadline
+            return original(*args, **kwargs)
+
+        clock = [1000.0]
+        self.ops.herdr = slow_get
+        with mock.patch.object(actions.time, "monotonic", side_effect=lambda: clock[0]):
+            action = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                                   dismiss_form=True)
+        self.assertLessEqual(timeouts[0], actions.DISMISS_TIMEOUT)
+        self.assertEqual(self.ops.sends, [("agent", "send-keys", "worker", "esc")])
+        self.assertEqual(action["status"], "failed")
+        self.assertIn("did not close in time", action["reason"])
+
+    def test_relay_dismiss_form_starts_no_read_after_its_deadline(self):
+        self.open_multiselect()
+        self.esc_closes_the_form(closes=False)  # the form stays open
+        original = self.ops.herdr
+        reads = []
+        clock = [1000.0]
+
+        def timed(*args, **kwargs):
+            if args[:2] == ("agent", "get") and self.ops.sends:
+                reads.append((clock[0], kwargs["timeout"]))
+            return original(*args, **kwargs)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        self.ops.herdr = timed
+        with mock.patch.object(actions.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(actions.time, "sleep", side_effect=sleep):
+            action = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                                   dismiss_form=True)
+        self.assertEqual(action["status"], "failed")
+        deadline = reads[0][0] + actions.DISMISS_TIMEOUT
+        self.assertTrue(all(started < deadline and 0 < timeout <= deadline - started
+                            for started, timeout in reads), reads[-3:])
+
+    def test_relay_dismiss_form_refusals(self):
+        self.open_multiselect()
+        # A stale token, a worker that is not on a form, or a pane no longer blocked: nothing is sent.
+        with self.assertRaisesRegex(actions.ActionError, "Stale relay"):
+            actions.relay("worker", "x", state_token="old", ops=self.ops, dismiss_form=True)
+        self.ops.statuses["worker"] = "idle"
+        with self.assertRaisesRegex(actions.ActionError, "no longer blocked"):
+            actions.relay("worker", "x", state_token="form-token", ops=self.ops, dismiss_form=True)
+        for state in ("ended_without_proof", "waiting_background", "done"):
+            with self.subTest(state=state):
+                self.set_state(state, state_token="form-token")
+                with self.assertRaisesRegex(actions.ActionError, "Only an open question form"):
+                    actions.relay("worker", "x", state_token="form-token", ops=self.ops, dismiss_form=True)
+        self.assertFalse(self.ops.sends)
+        self.assertFalse(registry.load()["actions"])
+
+    def test_watcher_leaves_a_dismissing_relay_alone_until_it_settles(self):
+        self.open_multiselect()
+        self.esc_closes_the_form()
+        original = self.ops.herdr
+        polled = []
+
+        def herdr(*args, **kwargs):
+            # The watcher polls between the Esc and the answer.
+            if args[:2] == ("agent", "prompt"):
+                polled.extend(watch.poll_once(ops=self.ops, now=time.time()))
+            return original(*args, **kwargs)
+
+        self.ops.herdr = herdr
+        action = actions.relay("worker", "Sources A and C", state_token="form-token", ops=self.ops,
+                               dismiss_form=True)
+        self.assertEqual(action["status"], "delivered")
+        self.assertFalse([event for event in polled if event["kind"] in {"worker_state", "delivery_unknown"}])
+        self.assertFalse(self.ops.verify_calls)
+
+    def test_ended_worker_after_a_dismissed_form_reports_the_form(self):
+        # the user pressed Esc on #330's multi-select form; the event said the final message was missing.
+        for fixture in ("dismissed-multiselect-form.jsonl", "declined-compound-form-interrupt.jsonl"):
+            with self.subTest(fixture=fixture):
+                records = [json.loads(line) for line in
+                           (FIXTURES / fixture).read_text(encoding="utf-8").splitlines()]
+                self.set_state("running")
+                self.ops.statuses["worker"] = "idle"
+                self.seed_records([PROMPT, *records])
+                watch._TRANSCRIPTS.clear()
+                watch.poll_once(ops=self.ops, now=100)
+                worker = actions.worker_named("worker")
+                self.assertEqual(worker["state"], "ended_without_proof")
+                message = worker["final_message"]
+                self.assertTrue(message.startswith("The worker's form was dismissed without an answer"))
+                question = records[0]["message"]["content"][0]["input"]["questions"][0]
+                self.assertIn(question["question"], message)
+                self.assertIn(f"1. {question['options'][0]['label']}", message)
+
+    def test_dismissed_form_questions_decision_table(self):
+        ask, rejected, marker = self.dismissed_records()
+        questions = ask["message"]["content"][0]["input"]["questions"]
+        answered = json.loads((FIXTURES / "askuserquestion-before-answer.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        answer = copy.deepcopy(ANSWER)
+        other_tool = copy.deepcopy(rejected)
+        other_tool["message"]["content"][0]["tool_use_id"] = "toolu_other"
+        sidechain = dict(rejected, isSidechain=True)
+        for records, expected in (
+            ([PROMPT, ask, rejected, marker], questions),        # dismissed, no reply since
+            ([PROMPT, ask, rejected], questions),
+            ([PROMPT, ask, rejected, marker, END], []),          # the worker replied afterwards
+            ([PROMPT, ask], []),                                 # still open
+            ([PROMPT, ASK, answer], []),                         # answered, not dismissed
+            ([PROMPT, ask, other_tool, marker], []),             # a different tool was rejected
+            ([PROMPT, ask, sidechain, marker], []),              # a subagent's record
+            ([PROMPT, answered, rejected], []),                  # rejection of a different form id
+        ):
+            with self.subTest(records=[r.get("type") for r in records], expected=bool(expected)):
+                self.assertEqual(transcript.dismissed_form_questions(records), expected)
+
     def test_relay_rechecks_the_form_on_the_records_it_sends_against(self):
         form = json.loads((FIXTURES / "multi-question-form-excerpt.jsonl").read_text(encoding="utf-8").splitlines()[0])
         single = json.loads((FIXTURES / "askuserquestion-before-answer.jsonl").read_text(encoding="utf-8").splitlines()[0])
@@ -1343,10 +1771,10 @@ class WatchTests(unittest.TestCase):
         self.ops.statuses["worker"] = "blocked"
         original = actions.refresh_session
 
-        def changed(worker, agent, *, now=None):
+        def changed(worker, agent, *, now=None, lane=None):
             # The single form is answered in the pane and a compound one appears before the send.
             self.ops.write("session-1", [PROMPT, form])
-            return original(worker, agent, now=now)
+            return original(worker, agent, now=now, lane=lane)
 
         with mock.patch.object(actions, "refresh_session", side_effect=changed),                 self.assertRaisesRegex(actions.ActionError, "multi-select: Gate"):
             actions.relay("worker", "1", state_token="form-token", ops=self.ops)
@@ -1459,7 +1887,7 @@ class WatchTests(unittest.TestCase):
         actions.refresh_session(old_worker, actions.agent_info(current, self.ops))
         watch.poll_once(ops=self.ops, now=101)
         watch._notify_events(self.ops)
-        title = f"{Path(self.worker['repo_path']).name} #{self.worker['issue']}: Worker answer superseded"
+        title = f"main: {Path(self.worker['repo_path']).name} #{self.worker['issue']}: Worker answer superseded"
         notifications = [n for n in self.ops.notifications if n[2] == title]
         self.assertEqual(len(notifications), 1)
         self.assertIn(answer, notifications[0][4])
@@ -1567,7 +1995,7 @@ class WatchTests(unittest.TestCase):
         watch.poll_once(ops=self.ops, now=101)
         self.assertEqual(registry.load()["holds"], {})
         watch.poll_once(ops=self.ops, now=102)
-        self.assertFalse(self.ops.notifications)
+        self.assertEqual(len(self.ops.notifications), 2)
         doc = registry.load()
         self.assertEqual(doc["workers"]["worker"]["state"], "lost")
         self.assertEqual(doc["workers"]["partial"]["state"], "start_interrupted")
@@ -1819,8 +2247,8 @@ class WatchTests(unittest.TestCase):
             self.assertEqual(watch.follow(compact=True), 0)
         lines = output.getvalue().splitlines()
         self.assertEqual([json.loads(line) for line in lines],
-                         [{"seq": seq, "kind": "worker_state", **metadata, "detail": True},
-                          {"seq": bare, "kind": "session_changed"}])
+                         [{"seq": seq, "kind": "worker_state", "lane": "main", **metadata, "detail": True},
+                          {"seq": bare, "kind": "session_changed", "lane": "main"}])
         self.assertTrue(all(len(line) < 400 for line in lines))
         ack.assert_not_called()
         self.assertEqual(registry.load(), before)
@@ -1832,7 +2260,7 @@ class WatchTests(unittest.TestCase):
         with mock.patch.object(watch, "watcher_alive", return_value=True), mock.patch.object(watch, "watcher_slow", return_value=False), mock.patch.object(watch.time, "sleep", side_effect=KeyboardInterrupt), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
             watch.follow(compact=True)
         self.assertEqual([json.loads(line) for line in output.getvalue().splitlines()],
-                         [{"seq": seq, "kind": "technical_problem", "detail": True} for seq in range(1, 5)])
+                         [{"seq": seq, "kind": "technical_problem", "lane": "main", "detail": True} for seq in range(1, 5)])
 
     def test_follow_compact_bounds_long_metadata_without_changing_event(self):
         payload = {"agent_name": 'name"\\\n' * 100, "worker_id": "w" * 1000,
@@ -1849,7 +2277,7 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(summary["seq"], seq)
         self.assertEqual(summary["kind"], "worker_state")
         self.assertEqual(summary["state_token"], payload["state_token"])
-        self.assertEqual(set(summary), (set(payload) - {"question_text"}) | {"seq", "kind", "detail"})
+        self.assertEqual(set(summary), (set(payload) - {"question_text"}) | {"seq", "kind", "lane", "detail"})
         self.assertEqual(registry.read_events(0)[0]["payload"], payload)
 
     def test_compact_line_flags_shortening_and_always_terminates(self):
@@ -1859,26 +2287,29 @@ class WatchTests(unittest.TestCase):
         # No string can shrink further: fall back to the minimal line instead of looping.
         stuck = watch._compact_line(
             {"seq": 2, "kind": "k" * 500, "payload": {"state_token": "t" * 32}})
-        self.assertEqual(json.loads(stuck), {"seq": 2, "kind": "k" * 500, "detail": True})
+        self.assertEqual(json.loads(stuck), {"seq": 2, "kind": "k" * 500, "lane": "main", "detail": True})
 
     def test_follow_quiet_suppresses_only_busy_states_and_ack_is_cumulative(self):
         registry.append_event("worker_state", {"state": "running"})
         question = registry.append_event("worker_state", {"state": "question", "question_text": "Pick A?"})
         registry.append_event("worker_state", {"state": "in_tool"})
         registry.append_event("worker_state", {"state": "waiting_background"})
+        registry.append_event("worker_state", {"state": "waiting_background", "final_message": ""})
+        registry.append_event("worker_state", {"state": "running", "final_message": "Still going"})
+        asked = registry.append_event("worker_state", {"state": "waiting_background", "final_message": "A or B?"})
         phase = registry.append_event("worker_phase", {"state": "running"})
         done = registry.append_event("worker_state", {"state": "done", "final_message": "Done"})
         for compact in (False, True):
             with self.subTest(compact=compact), mock.patch.object(watch, "watcher_alive", return_value=True), mock.patch.object(watch, "watcher_slow", return_value=False), mock.patch.object(watch.time, "sleep", side_effect=[None, KeyboardInterrupt]), mock.patch.object(registry, "read_events", wraps=registry.read_events) as reader, mock.patch.object(registry, "ack") as ack, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(watch.follow(quiet=True, compact=compact), 0)
             events = [json.loads(line) for line in output.getvalue().splitlines()]
-            self.assertEqual([event["seq"] for event in events], [question, phase, done])
+            self.assertEqual([event["seq"] for event in events], [question, asked, phase, done])
             self.assertEqual([call.args for call in reader.call_args_list], [(0,), (done,)])
             ack.assert_not_called()
-            self.assertEqual(registry.load()["ack_seq"], 0)
+            self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], 0)
         registry.ack(done)
-        self.assertEqual(registry.load()["ack_seq"], done)
-        self.assertEqual(registry.read_events(registry.load()["ack_seq"]), [])
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], done)
+        self.assertEqual(registry.read_events(registry.load()["lanes"]["main"]["ack_seq"]), [])
 
     def test_follow_default_keeps_full_json_and_busy_states(self):
         registry.append_event("worker_state", {"state": "running", "final_message": "Full\nmessage" * 100})
@@ -1892,7 +2323,8 @@ class WatchTests(unittest.TestCase):
         for flags in (("--compact",), ("--quiet",), ("--quiet", "--compact")):
             with self.subTest(flags=flags), mock.patch.object(watch, "follow", return_value=0) as follow:
                 self.assertEqual(herdr_coord.main(["follow", "--interval", "0.5", *flags]), 0)
-                follow.assert_called_once_with(interval=0.5, **{flag[2:]: True for flag in flags})
+                follow.assert_called_once_with(interval=0.5, lane="main", context=self.outside_context(),
+                                               **{flag[2:]: True for flag in flags})
 
     def test_cli_event_reads_full_acknowledged_event_without_acknowledging(self):
         seq = registry.append_event("worker_state", {"issue": 21, "state": "question",
@@ -1932,7 +2364,7 @@ class WatchTests(unittest.TestCase):
         with mock.patch.dict(os.environ), mock.patch.object(herdr_coord.repo_root, "base_root", return_value=Path(self.temp.name) / "unused-base"), mock.patch.object(herdr_coord.repo_root, "resolve_repo", return_value=repo) as resolve, mock.patch.object(herdr_coord.repo_root, "state_root", return_value=home) as state_root, mock.patch.object(herdr_coord.Path, "cwd", return_value=repo), mock.patch.object(registry, "ack") as ack, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
             os.environ.pop("HERDR_COORD_HOME", None)
             self.assertEqual(herdr_coord.main(["event", str(seq)]), 0)
-            self.assertEqual(registry.load()["ack_seq"], 0)
+            self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], 0)
         self.assertEqual(json.loads(output.getvalue()), expected)
         resolve.assert_called_once_with(repo)
         state_root.assert_called_once_with(repo)
@@ -2035,9 +2467,587 @@ class WatchTests(unittest.TestCase):
             run.assert_called_once_with()
         with mock.patch.object(watch, "follow", return_value=0) as follow:
             self.assertEqual(herdr_coord.main(["follow", "--interval", "0.5"]), 0)
-            follow.assert_called_once_with(interval=0.5)
+            follow.assert_called_once_with(interval=0.5, lane="main", context=self.outside_context())
         with mock.patch.object(watch, "launch", return_value={"state": "launch_failed"}), mock.patch("sys.stdout", new_callable=io.StringIO):
             self.assertEqual(herdr_coord.main(["launch-watcher"]), 1)
+
+    def follow_once(self, lane, **options):
+        if lane != "main" and "context" not in options:
+            options["context"] = self.seo_context
+        with mock.patch.object(watch, "watcher_alive", return_value=True), \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch.object(watch.time, "sleep", side_effect=KeyboardInterrupt), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = watch.follow(lane=lane, **options)
+        return code, [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def seo_worker(self):
+        registry.create_lane("seo")
+        registry.update(lambda doc: doc["workers"]["worker"].update(lane="seo", state="question"))
+        self.seo_context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1",
+                            "workspace_id": "w1", "controller": {
+                                "agent": "claude", "kind": "id", "value": "coordinator-session"},
+                            "source": "tab label"}
+        self.bind_follow(self.seo_context)
+
+    def bind_follow(self, context):
+        registry.update(lambda doc: doc["tab_bindings"].update({context["tab_id"]: {
+            "lane": context["lane"], "controller": dict(context["controller"]),
+            "pane_id": context["pane_id"], "source": context["source"], "explicit": False}}))
+
+    def outside_context(self):
+        return {"lane": "main", "tab_id": None, "pane_id": None, "workspace_id": None,
+                "controller": None, "source": "outside herdr"}
+
+    def test_two_lane_follow_and_cli_ack_keep_main_question_48(self):
+        self.seo_worker()
+        registry.update_with_events(lambda doc, events: events.extend([("observed", {})] * 47))
+        main = registry.append_event("worker_state", {"state": "question"})
+        registry.update_with_events(lambda doc, events: events.extend([("observed", {})] * 11))
+        seo = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        shared = registry.append_event("watcher_lost", {})
+        self.assertEqual((main, seo), (48, 60))
+        with mock.patch.object(herdr_coord.lanes, "resolve_context", return_value=self.seo_context), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(herdr_coord.main(["ack", "60"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {"ack_seq": 60})
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], 0)
+        self.assertEqual([e["seq"] for e in self.follow_once("seo")[1]], [shared])
+        main_events = self.follow_once("main")[1]
+        self.assertIn(main, [e["seq"] for e in main_events])
+        self.assertNotIn(seo, [e["seq"] for e in main_events])
+        self.assertEqual(main_events[-1]["seq"], shared)
+        registry.update(lambda doc: doc["lanes"]["seo"].update(ack_seq=0))
+        self.assertEqual([e["seq"] for e in self.follow_once("seo")[1]], [seo, shared])
+
+    def test_cli_event_refuses_another_lanes_event(self):
+        self.seo_worker()
+        seq = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        for lane, code in (("main", 1), ("seo", 0)):
+            context = dict(self.seo_context, lane=lane)
+            with mock.patch.object(herdr_coord.lanes, "resolve_context", return_value=context), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(herdr_coord.main(["event", str(seq)]), code)
+            self.assertEqual(json.loads(output.getvalue()).get("seq"), seq if code == 0 else None)
+
+    def test_lane_compact_quiet_preserves_questions_and_repo_events(self):
+        self.seo_worker()
+        registry.append_event("worker_state", {"worker_id": "worker", "state": "running"})
+        question = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        registry.append_event("worker_state", {"state": "question"})
+        shared = registry.append_event("watcher_lost", {})
+        code, events = self.follow_once("seo", compact=True, quiet=True)
+        self.assertEqual(code, 0)
+        self.assertEqual([e["seq"] for e in events], [question, shared])
+        self.assertEqual([e["lane"] for e in events], ["seo", "seo"])
+
+    def test_compact_handoff_carries_source_and_target_lanes(self):
+        self.seo_worker()
+        registry.append_event("worker_handoff", {"worker_id": "worker", "from_lane": "main", "to_lane": "seo"})
+        for lane in ("main", "seo"):
+            with self.subTest(lane=lane):
+                code, events = self.follow_once(lane, compact=True)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["lane"], lane)
+                self.assertEqual(events[0]["from_lane"], "main")
+                self.assertEqual(events[0]["to_lane"], "seo")
+                self.assertIs(events[0]["detail"], True)
+
+    def test_compact_unattended_carries_target_lane_separate_from_follower(self):
+        self.seo_worker()
+        registry.append_event("lane_unattended", {"lane": "seo"})
+        code, events = self.follow_once("main", compact=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["lane"], "main")
+        self.assertEqual(events[0]["target_lane"], "seo")
+        self.assertIs(events[0]["detail"], True)
+
+    def test_follow_lease_refuses_second_then_releases(self):
+        self.seo_worker()
+        lease = watch._claim_follow("seo", now=100, context=self.seo_context)
+        self.assertEqual(lease["pid"], os.getpid())
+        self.assertIn("process_created", lease)
+        self.assertEqual(lease["tab_id"], self.seo_context["tab_id"])
+        self.assertEqual(lease["controller"], self.seo_context["controller"])
+        with mock.patch.object(watch.time, "time", return_value=101):
+            code, events = self.follow_once("seo")
+        self.assertEqual(code, 1)
+        self.assertIn(str(lease["pid"]), events[0]["detail"])
+        self.assertEqual(registry.load()["lanes"]["seo"]["follow_lease"], lease)
+        self.assertEqual(self.follow_once("main")[0], 0)
+        watch._release_follow("seo", lease)
+        self.assertEqual(self.follow_once("seo")[0], 0)
+        self.assertIsNone(registry.load()["lanes"]["seo"]["follow_lease"])
+
+    def test_cli_follow_passes_resolved_context(self):
+        self.seo_worker()
+        with mock.patch.object(lanes, "resolve_context", return_value=self.seo_context), \
+                mock.patch.object(watch, "follow", return_value=0) as follow:
+            self.assertEqual(herdr_coord.main(["follow"]), 0)
+        follow.assert_called_once_with(interval=5, lane="seo", context=self.seo_context)
+
+    def test_follow_claim_refuses_a_live_lease_from_another_tab_and_controller(self):
+        self.seo_worker()
+        owner = start._start_owner()
+        lease = {"pid": owner["pid"], "process_created": owner["created"], "tab_id": "w2:t1",
+                 "controller": {"agent": "claude", "kind": "id", "value": "other-session"}}
+        registry.update(lambda doc: doc["lanes"]["seo"].update(follow_lease=lease))
+        watch._follow_heartbeat("seo", lease, now=100)
+        with self.assertRaisesRegex(ValueError, "already has follow running"):
+            watch._claim_follow("seo", now=101, context=self.seo_context)
+        self.assertEqual(registry.load()["lanes"]["seo"]["follow_lease"], lease)
+
+    def test_follow_claim_requires_its_exact_binding(self):
+        self.seo_worker()
+        for change in ("tab", "controller", "lane", "missing", "context lane"):
+            with self.subTest(change=change):
+                self.bind_follow(self.seo_context)
+                context = dict(self.seo_context)
+
+                def move(doc):
+                    binding = doc["tab_bindings"][context["tab_id"]]
+                    if change == "tab":
+                        doc["tab_bindings"]["w2:t1"] = doc["tab_bindings"].pop(context["tab_id"])
+                    elif change == "controller":
+                        binding["controller"]["value"] = "other-session"
+                    elif change == "lane":
+                        binding["lane"] = "main"
+                    elif change == "missing":
+                        del doc["tab_bindings"][context["tab_id"]]
+
+                registry.update(move)
+                if change == "context lane":
+                    context["lane"] = "main"
+                before = registry.load()
+                with self.assertRaisesRegex(ValueError, "lane binding moved; restart follow from the owning tab"):
+                    watch._claim_follow("seo", now=100, context=context)
+                self.assertEqual(registry.load(), before)
+                self.assertFalse((registry._home() / "follow-seo.json").exists())
+                registry.update(lambda doc: doc["tab_bindings"].clear())
+
+    def follow_to_refresh(self, context, change):
+        sleeps = []
+
+        def advance(_):
+            if sleeps:
+                raise KeyboardInterrupt
+            sleeps.append(True)
+            change()
+            clock.return_value = 130
+
+        with mock.patch.object(watch.time, "time", return_value=100) as clock, \
+                mock.patch.object(watch.time, "sleep", side_effect=advance), \
+                mock.patch.object(watch, "watcher_alive", return_value=True), \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = watch.follow(lane=context["lane"] if context else "main", context=context)
+        return code, output.getvalue()
+
+    def test_follow_refresh_releases_and_reports_a_moved_binding(self):
+        self.seo_worker()
+        for change in ("lane", "controller", "tab"):
+            with self.subTest(change=change):
+                self.bind_follow(self.seo_context)
+
+                def move():
+                    def update(doc):
+                        binding = doc["tab_bindings"][self.seo_context["tab_id"]]
+                        if change == "lane":
+                            binding["lane"] = "main"
+                        elif change == "controller":
+                            binding["controller"]["value"] = "other-session"
+                        else:
+                            doc["tab_bindings"]["w2:t1"] = doc["tab_bindings"].pop(self.seo_context["tab_id"])
+                    registry.update(update)
+
+                code, output = self.follow_to_refresh(self.seo_context, move)
+                self.assertEqual(code, 1)
+                self.assertIn("lane binding moved; restart follow from the owning tab", output)
+                self.assertIsNone(registry.load()["lanes"]["seo"]["follow_lease"])
+                self.snapshot.assert_called_with()
+                registry.update(lambda doc: doc["tab_bindings"].clear())
+
+    def test_follow_refresh_proven_absence_releases_but_unknown_keeps_lease(self):
+        self.seo_worker()
+        for snapshot, alive in ((None, True),
+                                ({"tab_ids": set(), "controller_counts": {"coordinator-session": 1}}, True),
+                                ({"tab_ids": {"w1:t1"}, "controller_counts": {}}, False)):
+            with self.subTest(snapshot=snapshot):
+                lease = watch._claim_follow("seo", now=100, context=self.seo_context)
+                with mock.patch.object(registry, "update", wraps=registry.update) as update:
+                    def read():
+                        update.assert_not_called()
+                        return snapshot
+
+                    with mock.patch.object(lanes, "read_snapshot", side_effect=read) as reader:
+                        if alive:
+                            self.assertTrue(watch._refresh_follow("seo", lease, now=130))
+                        else:
+                            with self.assertRaisesRegex(ValueError, "controller absent.*restart follow"):
+                                watch._refresh_follow("seo", lease, now=130)
+                    reader.assert_called_once_with()
+                self.assertEqual(registry.load()["lanes"]["seo"]["follow_lease"], lease if alive else None)
+                beat = json.loads((registry._home() / "follow-seo.json").read_text(encoding="utf-8"))
+                self.assertEqual(beat, {**lease, "ts": 130 if alive else 100})
+                watch._release_follow("seo", lease)
+
+    def test_background_follow_exits_when_its_controller_pane_closes(self):
+        self.seo_worker()
+        ops = LaneOps()
+        ops.caller("w1", "boon-town", tab_label="seo", session="coordinator-session")
+
+        def close_pane():
+            ops.panes["result"]["panes"] = [pane for pane in ops.panes["result"]["panes"]
+                                               if pane["agent_session"]["value"] != "coordinator-session"]
+
+        with mock.patch.object(lanes, "read_snapshot", wraps=self.read_snapshot) as snapshot, \
+                mock.patch.object(watch.adapters, "herdr", side_effect=ops.herdr):
+            code, output = self.follow_to_refresh(self.seo_context, close_pane)
+        self.assertEqual(code, 1)
+        self.assertIn("controller absent", output)
+        self.assertIn("lane binding moved; restart follow from the owning tab", output)
+        self.assertIsNone(registry.load()["lanes"]["seo"]["follow_lease"])
+        snapshot.assert_called_once_with()
+        self.assertEqual([args for args, timeout in ops.calls], [("tab", "list"), ("pane", "list")])
+
+    def test_outside_follow_keeps_pid_only_main_and_rejects_other_lanes(self):
+        for context in (None, self.outside_context()):
+            with self.subTest(context=context):
+                self.assertEqual(self.follow_once("main", context=context)[0], 0)
+                beat = json.loads((registry._home() / "follow-main.json").read_text(encoding="utf-8"))
+                self.assertEqual(set(beat), {"pid", "process_created", "ts"})
+                registry.create_lane("seo")
+                code, events = self.follow_once("seo", context=context)
+                self.assertEqual(code, 1)
+                self.assertIn("main", events[0]["detail"])
+
+    def test_outside_follow_without_main_binding_never_reads_herdr(self):
+        self.seo_worker()
+        ops = LaneOps()
+        ops.reader_errors[("tab", "list")] = TimeoutError("herdr unavailable")
+        ops.reader_errors[("pane", "list")] = TimeoutError("herdr unavailable")
+        for context in (None, self.outside_context()):
+            with self.subTest(context=context), \
+                    mock.patch.object(lanes, "read_snapshot", wraps=self.read_snapshot) as snapshot, \
+                    mock.patch.object(watch.adapters, "herdr", side_effect=ops.herdr) as herdr:
+                code, output = self.follow_to_refresh(context, lambda: None)
+                self.assertEqual(code, 0)
+                self.assertEqual(output, "")
+                snapshot.assert_not_called()
+                herdr.assert_not_called()
+            beat = json.loads((registry._home() / "follow-main.json").read_text(encoding="utf-8"))
+            self.assertEqual(beat["ts"], 130)
+
+    def test_outside_follow_shortcut_rechecks_main_binding_under_lock(self):
+        self.seo_worker()
+        self.bind_follow(dict(self.seo_context, lane="main"))
+        binding = registry.load()["tab_bindings"][self.seo_context["tab_id"]]
+        original = registry.update
+        for operation in ("claim", "refresh"):
+            with self.subTest(operation=operation):
+                self.snapshot.reset_mock()
+                registry.update(lambda doc: doc["tab_bindings"].clear())
+                lease = watch._claim_follow("main", now=100) if operation == "refresh" else None
+
+                def acquire_first(change):
+                    original(lambda doc: doc["tab_bindings"].update({self.seo_context["tab_id"]: binding}))
+                    return original(change)
+
+                with mock.patch.object(registry, "update", side_effect=acquire_first), \
+                        self.assertRaisesRegex(ValueError, "Lane main is owned by tab w1:t1"):
+                    if operation == "claim":
+                        watch._claim_follow("main", now=130)
+                    else:
+                        watch._refresh_follow("main", lease, now=130)
+                self.snapshot.assert_called_once_with()
+                self.assertIsNone(registry.load()["lanes"]["main"]["follow_lease"])
+
+    def test_outside_follow_retries_main_binding_added_after_snapshot(self):
+        self.seo_worker()
+        owner = dict(self.seo_context, lane="main")
+        stale = dict(owner, tab_id="old-tab", controller=dict(owner["controller"], value="departed"))
+        for operation in ("claim", "refresh"):
+            with self.subTest(operation=operation):
+                registry.update(lambda doc: doc["tab_bindings"].clear())
+                self.bind_follow(stale)
+                self.snapshot.return_value = {"tab_ids": set(), "controller_counts": {}}
+                lease = watch._claim_follow("main", now=100) if operation == "refresh" else None
+                reads = []
+
+                def snapshot():
+                    reads.append(True)
+                    if len(reads) == 1:
+                        self.bind_follow(owner)
+                        return {"tab_ids": set(), "controller_counts": {}}
+                    return {"tab_ids": {owner["tab_id"]},
+                            "controller_counts": {owner["controller"]["value"]: 1}}
+
+                with mock.patch.object(lanes, "read_snapshot", side_effect=snapshot), \
+                        mock.patch.object(watch, "_follow_heartbeat", wraps=watch._follow_heartbeat) as beat:
+                    with self.assertRaisesRegex(ValueError, "Lane main is owned by tab w1:t1"):
+                        if operation == "claim":
+                            watch._claim_follow("main", now=130)
+                        else:
+                            watch._refresh_follow("main", lease, now=130)
+                    beat.assert_not_called()
+                self.assertEqual(len(reads), 2)
+                self.assertIsNone(registry.load()["lanes"]["main"]["follow_lease"])
+
+    def test_outside_follow_stops_after_three_main_binding_changes(self):
+        self.seo_worker()
+        stale = dict(self.seo_context, lane="main", tab_id="old-tab",
+                     controller=dict(self.seo_context["controller"], value="departed"))
+        for operation in ("claim", "refresh"):
+            with self.subTest(operation=operation):
+                registry.update(lambda doc: doc["tab_bindings"].clear())
+                self.bind_follow(stale)
+                self.snapshot.return_value = {"tab_ids": set(), "controller_counts": {}}
+                lease = watch._claim_follow("main", now=100) if operation == "refresh" else None
+                reads = []
+
+                def snapshot():
+                    reads.append(True)
+                    registry.update(lambda doc: doc["tab_bindings"]["old-tab"].update(label_seen=str(len(reads))))
+                    return {"tab_ids": set(), "controller_counts": {}}
+
+                with mock.patch.object(lanes, "read_snapshot", side_effect=snapshot), \
+                        mock.patch.object(watch, "_follow_heartbeat") as beat:
+                    with self.assertRaisesRegex(ValueError, "Main lane bindings changed during herdr snapshot; "
+                                                + ("retry follow" if operation == "claim" else "stopping follow")):
+                        if operation == "claim":
+                            watch._claim_follow("main", now=130)
+                        else:
+                            watch._refresh_follow("main", lease, now=130)
+                    beat.assert_not_called()
+                self.assertEqual(len(reads), 3)
+                self.assertIsNone(registry.load()["lanes"]["main"]["follow_lease"])
+
+    def test_outside_follow_claim_guard_checks_main_controller_liveness(self):
+        self.seo_worker()
+        owner = dict(self.seo_context, lane="main")
+        self.bind_follow(owner)
+        for snapshot, allowed in ((None, False),
+                                  ({"tab_ids": set(), "controller_counts": {"coordinator-session": 1}}, False),
+                                  ({"tab_ids": {"w1:t1"}, "controller_counts": {}}, True)):
+            for context in (None, self.outside_context()):
+                with self.subTest(snapshot=snapshot, context=context), \
+                        mock.patch.object(lanes, "read_snapshot", return_value=snapshot):
+                    code, events = self.follow_once("main", context=context)
+                self.assertEqual(code, 0 if allowed else 1)
+                if not allowed:
+                    self.assertIn("snapshot" if snapshot is None else "w1:t1", events[0]["detail"])
+                self.assertIsNone(registry.load()["lanes"]["main"]["follow_lease"])
+
+    def test_outside_follow_exits_when_main_gets_an_owner_or_snapshot_is_unknown(self):
+        self.seo_worker()
+        for snapshot in (self.snapshot.return_value, None):
+            for context in (None, self.outside_context()):
+                with self.subTest(snapshot=snapshot, context=context):
+                    registry.update(lambda doc: doc["tab_bindings"].clear())
+
+                    def acquire():
+                        self.bind_follow(dict(self.seo_context, lane="main"))
+                        self.snapshot.return_value = snapshot
+
+                    code, output = self.follow_to_refresh(context, acquire)
+                    self.assertEqual(code, 1)
+                    self.assertIn("snapshot" if snapshot is None else "w1:t1", output)
+                    self.assertIsNone(registry.load()["lanes"]["main"]["follow_lease"])
+
+    def test_follow_lease_dead_reused_and_stale_holders_are_taken_over(self):
+        self.seo_worker()
+        for identity, now in ((None, 101), ({"pid": 42, "created": 2}, 101),
+                              ({"pid": 42, "created": 1}, 220),
+                              ({"pid": 42, "created": 1}, 221)):
+            with self.subTest(identity=identity, now=now):
+                old = {"pid": 42, "process_created": 1, "tab_id": self.seo_context["tab_id"],
+                       "controller": self.seo_context["controller"]}
+                registry.update(lambda doc: doc["lanes"]["seo"].update(follow_lease=old))
+                watch._follow_heartbeat("seo", old, now=100)
+                with mock.patch.object(start, "_process_identity", return_value=identity):
+                    self.assertFalse(watch.follower_alive("seo", old, now=now))
+                    with mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 3}):
+                        lease = watch._claim_follow("seo", now=now, context=self.seo_context)
+                self.assertEqual(lease, {**old, "pid": 43, "process_created": 3})
+                watch._release_follow("seo", old)
+                self.assertEqual(registry.load()["lanes"]["seo"]["follow_lease"], lease)
+
+    def test_fresh_follower_with_inaccessible_process_stays_live_and_refuses_second(self):
+        self.seo_worker()
+        lease = watch._claim_follow("seo", now=100, context=self.seo_context)
+        with mock.patch.object(start, "_process_identity", side_effect=OSError("access denied")), \
+                mock.patch.object(start, "_start_owner", return_value={"pid": 43, "created": 2}):
+            self.assertTrue(watch.follower_alive("seo", lease, now=101))
+            with self.assertRaisesRegex(ValueError, "already has follow running"):
+                watch._claim_follow("seo", now=101, context=self.seo_context)
+        self.assertEqual(registry.load()["lanes"]["seo"]["follow_lease"], lease)
+
+    def test_follow_heartbeats_are_atomic_and_do_not_write_registry(self):
+        self.seo_worker()
+        lease = watch._claim_follow("seo", now=100, context=self.seo_context)
+        path = registry._home() / "registry.json"
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        with mock.patch.object(registry, "replace_with_retry", wraps=registry.replace_with_retry) as replace:
+            self.assertTrue(watch._refresh_follow("seo", lease, now=130))
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual(replace.call_args.args[1], registry._home() / "follow-seo.json")
+        self.assertEqual(json.loads((registry._home() / "follow-seo.json").read_text(encoding="utf-8")),
+                         {**lease, "ts": 130})
+        self.assertEqual(list(registry._home().glob("follow-*.tmp")), [])
+        self.assertTrue(watch.follower_alive("seo", lease, now=249))
+        self.assertFalse(watch.follower_alive("seo", lease, now=250))
+
+    def test_follow_refreshes_at_30_seconds_and_cannot_clear_a_successor(self):
+        self.seo_worker()
+        beats = []
+        ticks = iter([100, 129, 130, 159])
+        with mock.patch.object(watch.time, "time", side_effect=lambda: next(ticks)), \
+                mock.patch.object(watch, "watcher_alive", return_value=True), \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch.object(watch.time, "sleep", side_effect=[None, None, None, KeyboardInterrupt]), \
+                mock.patch.object(watch, "_follow_heartbeat", side_effect=lambda lane, lease, *, now: beats.append(now)):
+            self.assertEqual(watch.follow(lane="seo", context=self.seo_context), 0)
+        self.assertEqual(beats, [100, 130])
+        lease = watch._claim_follow("seo", now=200, context=self.seo_context)
+        successor = {**lease, "pid": 43, "process_created": 3}
+        registry.update(lambda doc: doc["lanes"]["seo"].update(follow_lease=successor))
+        self.assertFalse(watch._refresh_follow("seo", lease, now=230))
+        watch._release_follow("seo", lease)
+        self.assertEqual(registry.load()["lanes"]["seo"]["follow_lease"], successor)
+
+    def test_status_uses_follow_lease_liveness(self):
+        self.seo_worker()
+        watch._claim_follow("seo", now=100, context=self.seo_context)
+        for now, expected in ((101, "live"), (220, "absent")):
+            with mock.patch.object(watch.time, "time", return_value=now), \
+                    mock.patch.object(watch, "watcher_alive", return_value=False), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(herdr_coord.main(["status"]), 0)
+            self.assertIn(f"lane: seo\tfollow={expected}\tunhandled=0", output.getvalue())
+
+    def unattended_poll(self, now):
+        with mock.patch.object(watch, "_poll_worker"), mock.patch.object(watch, "_drain"):
+            return watch.poll_once(ops=self.ops, now=now)
+
+    def test_unattended_alert_repeats_hourly_and_ack_clears(self):
+        self.seo_worker()
+        question = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.unattended_poll(100)
+        self.assertEqual(registry.load()["lanes"]["seo"]["unattended_since"], 100)
+        self.assertEqual(self.unattended_poll(999), [])
+        first = self.unattended_poll(100 + 16 * 60)
+        self.assertEqual([e["kind"] for e in first], ["lane_unattended"])
+        self.assertEqual(first[0]["scope"], "repo")
+        self.assertEqual(first[0]["payload"]["lane"], "seo")
+        self.assertEqual(self.unattended_poll(100 + 26 * 60), [])
+        self.assertEqual([e["kind"] for e in self.unattended_poll(100 + 77 * 60)], ["lane_unattended"])
+        registry.ack(question, lane="seo")
+        self.assertEqual(self.unattended_poll(100 + 138 * 60), [])
+        lane = registry.load()["lanes"]["seo"]
+        self.assertIsNone(lane["unattended_since"])
+        self.assertIsNone(lane["last_alert_at"])
+        self.assertEqual(sum("seo" in n[2] and "unattended" in n[2] for n in self.ops.notifications), 2)
+
+    def test_old_question_with_recently_departed_follower_is_not_unattended(self):
+        self.seo_worker()
+        registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.unattended_poll(100)
+        watch._claim_follow("seo", now=1000, context=self.seo_context)
+        self.unattended_poll(1001)
+        self.assertIsNone(registry.load()["lanes"]["seo"]["unattended_since"])
+        lease = registry.load()["lanes"]["seo"]["follow_lease"]
+        watch._release_follow("seo", lease)
+        self.assertEqual(self.unattended_poll(1060), [])
+        self.assertEqual(registry.load()["lanes"]["seo"]["unattended_since"], 1060)
+
+    def test_repo_events_never_make_a_lane_unattended_even_when_herdr_is_down(self):
+        self.seo_worker()
+        registry.append_event("watcher_slow", {"detail": "slow"})
+        registry.append_event("lane_unattended", {"lane": "main"})
+        self.ops.reachable = False
+        self.unattended_poll(100)
+        self.unattended_poll(1060)
+        self.assertIsNone(registry.load()["lanes"]["seo"]["unattended_since"])
+        self.assertIsNone(registry.load()["lanes"]["seo"]["last_alert_at"])
+
+    def test_unattended_checks_run_when_herdr_is_unreachable(self):
+        self.seo_worker()
+        registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.ops.reachable = False
+        self.unattended_poll(100)
+        self.assertEqual([e["kind"] for e in self.unattended_poll(1060)], ["lane_unattended"])
+
+    def test_notification_lane_uses_event_routing_and_shared_notice_is_sent_once(self):
+        self.seo_worker()
+        registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        registry.update(lambda doc: doc["workers"]["worker"].update(lane="main"))
+        registry.append_event("watcher_exit", {"detail": "stopped"})
+        watch._notify_events(self.ops)
+        watch._notify_events(self.ops)
+        self.assertEqual(len(self.ops.notifications), 2)
+        self.assertTrue(self.ops.notifications[0][2].startswith("seo: "))
+        self.assertIn("watcher stopped", self.ops.notifications[1][2])
+        self.assertEqual(registry.load()["notification_seq"], 2)
+
+    def test_pre_upgrade_worker_notification_names_main_after_worker_moves(self):
+        self.seo_worker()
+        event = {"seq": 1, "kind": "worker_state", "payload": {"worker_id": "worker", "state": "question"}}
+        title, _ = watch._notification(event, actions.worker_named("worker"))
+        self.assertTrue(title.startswith("main: "))
+
+    def test_follower_liveness_requires_a_matching_readable_heartbeat(self):
+        self.seo_worker()
+        lease = watch._claim_follow("seo", now=100, context=self.seo_context)
+        path = registry._home() / "follow-seo.json"
+        for data in ("{}", "null", "[]", "invalid", json.dumps({**lease, "pid": 42, "ts": 100}),
+                     json.dumps({**lease, "tab_id": "w2:t1", "ts": 100}),
+                     json.dumps({**lease, "controller": {**lease["controller"], "value": "other"}, "ts": 100})):
+            with self.subTest(data=data):
+                path.write_text(data, encoding="utf-8")
+                self.assertFalse(watch.follower_alive("seo", lease, now=101))
+        path.unlink()
+        self.assertFalse(watch.follower_alive("seo", lease, now=101))
+
+    def test_unattended_rechecks_ack_and_follow_claim_under_the_update_lock(self):
+        self.seo_worker()
+        question = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.unattended_poll(100)
+        original = registry.update_with_events
+
+        def racing(change, **kwargs):
+            with mock.patch.object(registry, "update_with_events", original):
+                registry.ack(question, lane="seo")
+            return original(change, **kwargs)
+
+        with mock.patch.object(registry, "update_with_events", side_effect=racing):
+            watch._check_unattended(1060)
+        self.assertEqual([e["kind"] for e in registry.read_events(question, lane=None)], [])
+        registry.update(lambda doc: doc["lanes"]["seo"].update(ack_seq=0, unattended_since=100))
+
+        def claim_first(change, **kwargs):
+            with mock.patch.object(registry, "update_with_events", original):
+                watch._claim_follow("seo", now=1060, context=self.seo_context)
+            return original(change, **kwargs)
+
+        with mock.patch.object(registry, "update_with_events", side_effect=claim_first):
+            watch._check_unattended(1060)
+        self.assertEqual([e["kind"] for e in registry.read_events(question, lane=None)], [])
+        self.assertIsNone(registry.load()["lanes"]["seo"]["unattended_since"])
+
+    def test_refresh_session_updates_workspace_and_pane_with_or_without_session_change(self):
+        for session in ("session-1", "session-2", None):
+            with self.subTest(session=session):
+                worker = actions.worker_named("worker")
+                agent = {"workspace_id": "new-workspace", "pane_id": "new-pane"}
+                if session:
+                    agent["agent_session"] = {"value": session}
+                current = actions.refresh_session(worker, agent, now=100)
+                self.assertEqual(current["workspace_id"], "new-workspace")
+                self.assertEqual(current["pane_id"], "new-pane")
+                self.assertEqual(registry.load()["workers"]["worker"], current)
+                registry.update(lambda doc: doc["workers"]["worker"].update(workspace_id="old", pane_id="old"))
 
 
 if __name__ == "__main__":

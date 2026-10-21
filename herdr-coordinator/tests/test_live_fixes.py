@@ -406,13 +406,16 @@ class ReopenedWorkerTests(unittest.TestCase):
         self.assertEqual(len(watch._reopen_records(actions.worker_named("worker"), new)), 2)
 
     def test_brainstorm_artifact_mentioned_only_before_reopen_does_not_count(self):
-        artifact = Path(self.temp.name) / "requirements.md"
-        artifact.write_text("# Requirements", encoding="utf-8")
+        artifact = Path(self.temp.name) / "plans" / "requirements.md"
+        artifact.parent.mkdir()
+        artifact.write_text(finish_fixtures.PLAN_TEXT, encoding="utf-8")
         self.set_state("done", entry_command="ce-brainstorm")
-        old = [action_fixtures.PROMPT, self.final_record(f"Saved `{artifact.name}`.")]
+        old = [action_fixtures.PROMPT, self.final_record(f"Saved `plans/{artifact.name}`.")]
         self.reopen(records=old, confirm=True)
         self.real_verifier()
-        sidechain = dict(self.final_record(f"Saved `{artifact.name}`."), isSidechain=True)
+        self.github.git_status.stdout = "?? plans/requirements.md"  # the worker wrote it
+        self.ops.git = self.github.git
+        sidechain = dict(self.final_record(f"Saved `plans/{artifact.name}`."), isSidechain=True)
         # A textless follow-up end_turn otherwise lets the verifier fall back to the old text.
         self.ops.write("session-1", [sidechain, self.final_record([])], append=True)
         worker = self.poll()
@@ -420,7 +423,7 @@ class ReopenedWorkerTests(unittest.TestCase):
         self.assertIsNone(worker["final_message"])
         self.assertFalse(self.github.calls)
         # Main-thread evidence after the baseline still counts.
-        self.ops.write("session-1", [self.final_record(f"Updated `{artifact.name}`.")], append=True)
+        self.ops.write("session-1", [self.final_record(f"Updated `plans/{artifact.name}`.")], append=True)
         self.assertEqual(self.poll(now=finish_fixtures.NOW + 1)["state"], "done")
 
     def test_never_reopened_worker_still_accepts_an_old_merged_pr(self):
