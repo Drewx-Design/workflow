@@ -149,6 +149,15 @@ Work through these steps in order. Each step that needs the user's word says so.
    - **`start_failed` worker with its session open:** it has no state token, so nothing can be relayed to it, and `restart` refuses because its entry already arrived. Tell the user they can answer in that pane themselves, or on their word close it with `cleanup --abandon <agent_name or issue number>` and start the issue again later. Never type into the pane yourself.
 5. Start `follow` last (Start of every session, step 2), once your lane is bound and `status` shows it.
 
+## Sessions the user started themselves
+
+`start` needs a GitHub issue and cuts its worktree from `origin/main`, so a repository with no remote (observed 2026-10-21) cannot start workers. The user then opens the session themselves in a herdr tab. That session is not in the registry: it raises no events, `status` does not list it, and `relay`, `nudge` and `resume` cannot reach it. Coordinate it this way:
+
+- Find it with ListAgents (it shows as `<repo>-NN [ref] · interactive`). Read its progress from its transcript, the newest `.jsonl` in `~/.claude/projects/<project slug>/` other than your own session's, rather than by messaging it.
+- When it ends a turn on a question or an open form, tell the user the question word for word and that it waits in that tab. They answer in its pane. Do not answer it, and do not type into its pane.
+- SendMessage reaches it, but a message waits unread behind an open form, and it is not a recorded action. Use it only for information the session lacks (for example a framework change merged after it started), never for an answer to its question, and never while a form is open.
+- Check on it when the user asks, or when you would otherwise report status. No watcher follows it.
+
 ## Other commands
 
 - `python $hc status` — one line per worker (issue, agent name, state, PR, last change, lane), one line per lane, open holds, and the watcher's health.
