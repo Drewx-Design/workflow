@@ -57,6 +57,7 @@ def main(argv=None):
     command.add_argument("--interval", type=float, default=5)
     command.add_argument("--compact", action="store_true", help="show short event summaries")
     command.add_argument("--quiet", action="store_true", help="hide running and in_tool worker state events")
+    command.add_argument("--wake", action="store_true", help="wait quietly until new actionable events, then exit")
     command = commands.add_parser("event", help="read a full event without acknowledging it")
     command.add_argument("seq", type=int)
     command = commands.add_parser("ack", help="acknowledge an event after handling it")
@@ -518,7 +519,7 @@ def _coordinator_command(args):
         if args.command == "watch-run":
             return watch.run()
         if args.command == "follow":
-            options = {key: True for key in ("compact", "quiet") if getattr(args, key)}
+            options = {key: True for key in ("compact", "quiet", "wake") if getattr(args, key)}
             return watch.follow(interval=args.interval, lane=args.lane, context=args.lane_context, **options)
         if args.command == "status":
             snapshot = lanes.read_snapshot(caller_pane_id=os.environ.get("HERDR_PANE_ID"))

@@ -305,6 +305,38 @@ def event_lanes(event):
     return None if _repo_event(event.get("kind", ""), event.get("payload", {})) else ["main"]
 
 
+# These known kinds can require coordinator action, depending on their payload.
+ACTIONABLE_EVENT_KINDS = frozenset({
+    "worker_state", "worker_start_failed", "checks_overdue", "worker_handoff",
+    "lane_unattended", "herdr_lost", "watcher_lost", "watcher_exit", "watcher_hung",
+    "technical_problem", "delivery_unknown", "send_refused", "delivery_failed", "action_superseded",
+})
+
+# These known kinds are always bookkeeping; unknown kinds must never be auto-acked.
+BOOKKEEPING_EVENT_KINDS = frozenset({
+    "worker_starting", "worker_phase", "session_discovered", "entry_action_recorded",
+    "action_delivered", "session_changed", "watcher_slow", "holds_cleared", "issue_refused",
+    "worker_cleaned",
+})
+
+
+def event_actionable(event) -> bool:
+    """Whether this event needs coordinator attention; unknown kinds return False."""
+    kind = event.get("kind")
+    payload = event.get("payload", {})
+    if kind in {"worker_state", "worker_start_failed"}:
+        state = payload.get("state")
+        return (state in {"question", "ended_without_proof", "done", "start_failed",
+                          "start_interrupted", "lost", "stalled"}
+                or (state == "waiting_background" and bool(payload.get("final_message")))
+                or (state == "awaiting_checks" and bool(payload.get("overdue"))))
+    if kind == "technical_problem":
+        return not payload.get("failed_iterations")
+    if kind == "action_superseded":
+        return payload.get("kind") == "relay"
+    return kind in ACTIONABLE_EVENT_KINDS
+
+
 def _visible(event, lane):
     routed = event_lanes(event)
     return lane is None or routed is None or lane in routed

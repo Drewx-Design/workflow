@@ -116,6 +116,83 @@ class RegistryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     registry.load()
 
+    def test_event_actionable_worker_states_and_payload_conditions(self):
+        for kind in ("worker_state", "worker_start_failed"):
+            for state in ("question", "ended_without_proof", "done", "start_failed",
+                          "start_interrupted", "lost", "stalled"):
+                with self.subTest(kind=kind, state=state):
+                    self.assertIs(registry.event_actionable({"kind": kind, "payload": {"state": state}}), True)
+            for state in ("running", "in_tool", "quota_wait", "queued", "starting", "awaiting_merge",
+                          "cleaned", "relay_pending", "future_state", None):
+                with self.subTest(kind=kind, state=state):
+                    self.assertIs(registry.event_actionable({
+                        "kind": kind, "payload": {"state": state, "final_message": "text", "overdue": True}}), False)
+            for final_message, expected in ((None, False), ("", False), ("A or B?", True)):
+                with self.subTest(kind=kind, final_message=final_message):
+                    payload = {"state": "waiting_background", "final_message": final_message}
+                    self.assertIs(registry.event_actionable({"kind": kind, "payload": payload}), expected)
+            for overdue, expected in ((None, False), (False, False), (True, True)):
+                with self.subTest(kind=kind, overdue=overdue):
+                    payload = {"state": "awaiting_checks", "overdue": overdue}
+                    self.assertIs(registry.event_actionable({"kind": kind, "payload": payload}), expected)
+            for state in ("waiting_background", "awaiting_checks"):
+                self.assertIs(registry.event_actionable({"kind": kind, "payload": {"state": state}}), False)
+        # A lost worker remains actionable even when the repository loss also named it.
+        self.assertIs(registry.event_actionable({"kind": "worker_state", "payload": {
+            "state": "lost", "reason": "herdr_lost"}}), True)
+
+    def test_event_actionable_known_kinds_and_unknowns(self):
+        for kind in ("checks_overdue", "worker_handoff", "lane_unattended", "herdr_lost",
+                     "watcher_lost", "watcher_exit", "watcher_hung", "delivery_unknown",
+                     "send_refused", "delivery_failed"):
+            with self.subTest(kind=kind):
+                self.assertIs(registry.event_actionable({"kind": kind, "payload": {}}), True)
+        for kind in ("worker_starting", "worker_phase", "session_discovered", "entry_action_recorded",
+                     "action_delivered", "session_changed", "watcher_slow", "holds_cleared",
+                     "issue_refused", "worker_cleaned", "future_kind"):
+            with self.subTest(kind=kind):
+                self.assertIs(registry.event_actionable({"kind": kind, "payload": {
+                    "state": "question", "overdue": True, "kind": "relay"}}), False)
+        self.assertIs(registry.event_actionable({}), False)
+        for failed_iterations, expected in ((None, True), (0, True), (1, False), (5, False)):
+            with self.subTest(failed_iterations=failed_iterations):
+                self.assertIs(registry.event_actionable({"kind": "technical_problem", "payload": {
+                    "failed_iterations": failed_iterations}}), expected)
+        self.assertIs(registry.event_actionable({"kind": "technical_problem", "payload": {}}), True)
+        for kind, expected in (("relay", True), ("nudge", False), ("resume", False), (None, False)):
+            with self.subTest(superseded_kind=kind):
+                self.assertIs(registry.event_actionable({"kind": "action_superseded", "payload": {
+                    "kind": kind}}), expected)
+        self.assertIs(registry.event_actionable({"kind": "action_superseded", "payload": {}}), False)
+        self.assertFalse(registry.ACTIONABLE_EVENT_KINDS & registry.BOOKKEEPING_EVENT_KINDS)
+
+    def test_woken_through_is_optional_and_round_trips_per_lane_without_version_change(self):
+        registry.create_lane("seo")
+        before = registry.load()
+        self.assertTrue(all("woken_through" not in lane for lane in before["lanes"].values()))
+
+        def record(doc):
+            doc["lanes"]["main"]["woken_through"] = 7
+            doc["lanes"]["seo"]["woken_through"] = 3
+
+        registry.update(record)
+        expected = json.loads(json.dumps(before))
+        record(expected)
+        self.assertEqual(registry.load(), expected)
+        self.assertEqual(registry.update(lambda doc: None), expected)
+        self.assertEqual(registry.load()["version"], 3)
+
+    def test_migration_preserves_optional_woken_through(self):
+        old, _ = self.v2_state()
+        old["lanes"]["main"]["woken_through"] = 42
+        old["lanes"]["seo"]["woken_through"] = 43
+        registry.save(old)
+        doc = registry.update(lambda doc: None)
+        self.assertEqual(doc["version"], 3)
+        self.assertEqual(doc["lanes"]["main"]["woken_through"], 42)
+        self.assertEqual(doc["lanes"]["seo"]["woken_through"], 43)
+        self.assertEqual(registry.load(), doc)
+
     def legacy_state(self):
         doc = {
             "version": 1, "workers": {

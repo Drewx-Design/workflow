@@ -1292,6 +1292,120 @@ class WatchTests(unittest.TestCase):
                 self.ops.notifications.clear()
                 self.ops.verdict.update(state="ended_without_proof")
 
+    def reopen_typed_turn(self):
+        self.set_state("done", state_token="done-token")
+        self.seed_records([PROMPT, END])
+        self.ops.write("session-1", [PROMPT, TOOL], append=True)
+        watch.poll_once(ops=self.ops, now=100)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["state"], "running")
+        self.assertIs(worker["typed_turn"], True)
+        self.assertFalse(self.ops.notifications)
+        self.assertFalse(self.ops.sends)
+
+    def test_typed_reopen_ended_without_proof_emits_actionable_event_without_notification(self):
+        self.reopen_typed_turn()
+        self.ops.write("session-1", [RESULT, END], append=True)
+        events = watch.poll_once(ops=self.ops, now=101)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "ended_without_proof")
+        self.assertIs(event["payload"]["typed_turn"], True)
+        self.assertTrue(registry.event_actionable(event))
+        self.assertIsNone(watch._notification(event))
+        self.assertFalse(self.ops.notifications)
+        self.assertEqual(registry.load()["notification_seq"], event["seq"])
+
+    def test_relay_after_typed_turn_restores_settle_notification(self):
+        self.reopen_typed_turn()
+        self.ops.write("session-1", [RESULT, END], append=True)
+        watch.poll_once(ops=self.ops, now=101)
+        worker = actions.worker_named("worker")
+        action = actions.relay("worker", "Please continue", state_token=worker["state_token"], ops=self.ops)
+        self.assertEqual(action["status"], "delivered")
+        self.ops.write("session-1", [END], append=True)
+        events = watch.poll_once(ops=self.ops, now=102)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "ended_without_proof")
+        self.assertFalse(event["payload"].get("typed_turn"))
+        self.assertIsNotNone(watch._notification(event))
+        self.assertEqual(len(self.ops.notifications), 1)
+        self.assertIn("ended_without_proof", self.ops.notifications[0][2])
+
+    def test_done_after_typed_turn_does_not_notify(self):
+        self.reopen_typed_turn()
+        self.ops.verdict.update(state="done", pr=42, url="https://example.invalid/pr/42")
+        self.ops.write("session-1", [RESULT, END], append=True)
+        events = watch.poll_once(ops=self.ops, now=101)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "done")
+        self.assertIs(event["payload"]["typed_turn"], True)
+        self.assertTrue(registry.event_actionable(event))
+        self.assertIsNone(watch._notification(event))
+        self.assertFalse(self.ops.notifications)
+
+    def test_queued_relay_clears_typed_turn_when_delivered_and_next_settle_notifies(self):
+        self.set_state("ended_without_proof", typed_turn=True)
+        registry.update(lambda doc: doc["config"].update(cap=1))
+        self.add_worker("busy", session="busy-session", issue=2)
+        result = actions.relay("worker", "Please continue", state_token="worker-state", ops=self.ops)
+        self.assertEqual(result["state"], "relay_pending")
+        self.assertTrue(actions.worker_named("worker")["typed_turn"])
+        self.assertFalse(self.ops.sends)
+        registry.update(lambda doc: doc["workers"]["busy"].update(state="done"))
+        watch._drain(self.ops)
+        self.assertEqual(actions.worker_named("worker")["state"], "running")
+        self.assertFalse(actions.worker_named("worker").get("typed_turn"))
+        self.assertEqual(len(self.ops.sends), 1)
+        self.ops.write("session-1", [END], append=True)
+        events = watch.poll_once(ops=self.ops, now=100)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "ended_without_proof")
+        self.assertFalse(event["payload"].get("typed_turn"))
+        self.assertEqual(len(self.ops.notifications), 1)
+
+    def test_question_after_typed_turn_stays_actionable_without_notification(self):
+        self.reopen_typed_turn()
+        self.ops.statuses["worker"] = "blocked"
+        self.ops.write("session-1", [RESULT], append=True)
+        events = watch.poll_once(ops=self.ops, now=101)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "question")
+        self.assertIs(event["payload"]["typed_turn"], True)
+        self.assertTrue(registry.event_actionable(event))
+        self.assertIsNone(watch._notification(event))
+        self.assertFalse(self.ops.notifications)
+
+    def test_background_final_message_after_typed_turn_carries_mark(self):
+        self.reopen_typed_turn()
+        self.ops.write("session-1", [RESULT, *background_pair("Bash"), self.end_saying("Which option?")],
+                       append=True)
+        events = watch.poll_once(ops=self.ops, now=101)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "waiting_background")
+        self.assertEqual(event["payload"]["final_message"], "Which option?")
+        self.assertIs(event["payload"]["typed_turn"], True)
+        self.assertTrue(registry.event_actionable(event))
+        self.assertIsNone(watch._notification(event))
+        self.assertFalse(self.ops.notifications)
+
+    def test_question_without_typed_turn_still_notifies(self):
+        self.ops.statuses["worker"] = "blocked"
+        self.seed_records([PROMPT, TOOL, RESULT])
+        events = watch.poll_once(ops=self.ops, now=100)
+        (event,) = [event for event in events if event["kind"] == "worker_state"]
+        self.assertEqual(event["payload"]["state"], "question")
+        self.assertFalse(event["payload"].get("typed_turn"))
+        self.assertIsNotNone(watch._notification(event))
+        self.assertEqual(len(self.ops.notifications), 1)
+        self.assertIn("question", self.ops.notifications[0][2])
+
+    def test_typed_turn_does_not_suppress_other_worker_notifications(self):
+        for kind, state in (("worker_state", "lost"), ("worker_state", "stalled"),
+                            ("checks_overdue", "awaiting_checks")):
+            with self.subTest(kind=kind, state=state):
+                event = {"kind": kind, "payload": {"state": state, "typed_turn": True}}
+                self.assertIsNotNone(watch._notification(event))
+
     def test_unanswered_prompt_then_answered_notice_keeps_worker_settled(self):
         notice = copy.deepcopy(PROMPT)
         notice["message"]["content"] = background_notification("bg-1")["message"]["content"]
@@ -2286,6 +2400,219 @@ class WatchTests(unittest.TestCase):
             self.assertEqual(watch.launch()["state"], "already_running")
             popen.assert_not_called()
 
+    def wake_once(self, *, lane="main", sleeps=0, **options):
+        if lane != "main":
+            options.setdefault("context", self.seo_context)
+        with mock.patch.object(watch, "watcher_alive", return_value=True), \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch.object(watch.time, "sleep", side_effect=KeyboardInterrupt) as sleep, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = watch.follow(wake=True, lane=lane, **options)
+        self.assertEqual(sleep.call_count, sleeps)
+        self.assertIsNone(registry.load()["lanes"][lane]["follow_lease"])
+        return code, output.getvalue()
+
+    def test_follow_wake_acks_only_leading_known_bookkeeping_without_printing(self):
+        kinds = ("worker_starting", "worker_phase", "session_discovered", "entry_action_recorded",
+                 "action_delivered", "session_changed", "watcher_slow", "holds_cleared",
+                 "issue_refused", "worker_cleaned")
+        for kind in kinds:
+            last = registry.append_event(kind, {})
+        for kind, payload in (("worker_state", {"state": "running"}),
+                              ("worker_start_failed", {"state": "in_tool"}),
+                              ("worker_state", {"state": "quota_wait"}),
+                              ("worker_state", {"state": "awaiting_checks"}),
+                              ("technical_problem", {"failed_iterations": 1}),
+                              ("action_superseded", {"kind": "nudge"})):
+            last = registry.append_event(kind, payload)
+        with mock.patch.object(registry, "ack", wraps=registry.ack) as ack:
+            self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        ack.assert_called_once_with(last, lane="main")
+        current = registry.load()["lanes"]["main"]
+        self.assertEqual(current["ack_seq"], last)
+        self.assertNotIn("woken_through", current)
+
+    def test_follow_wake_prints_actionable_batch_and_intervening_bookkeeping(self):
+        for compact in (False, True):
+            with self.subTest(compact=compact), mock.patch.dict(os.environ, {
+                    "HERDR_COORD_HOME": str(Path(self.temp.name) / f"wake-{compact}")}):
+                leading = registry.append_event("worker_phase", {})
+                first = registry.append_event("worker_state", {"state": "question", "question_text": "A or B?"})
+                registry.append_event("worker_state", {"state": "in_tool"})
+                last = registry.append_event("worker_state", {"state": "done", "final_message": "Done"})
+                registry.append_event("session_changed", {})
+                expected = [event for event in registry.read_events(leading) if event["seq"] <= last]
+                with mock.patch.object(registry, "ack", wraps=registry.ack) as ack:
+                    code, output = self.wake_once(compact=compact)
+                self.assertEqual(code, 0)
+                ack.assert_called_once_with(leading, lane="main")
+                if compact:
+                    self.assertEqual([json.loads(line) for line in output.splitlines()], [
+                        {"seq": first, "kind": "worker_state", "lane": "main", "state": "question", "detail": True},
+                        {"seq": first + 1, "kind": "worker_state", "lane": "main", "state": "in_tool"},
+                        {"seq": last, "kind": "worker_state", "lane": "main", "state": "done", "detail": True},
+                    ])
+                else:
+                    self.assertEqual(output, "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in expected))
+                current = registry.load()["lanes"]["main"]
+                self.assertEqual(current["ack_seq"], leading)
+                self.assertEqual(current["woken_through"], last)
+
+    def test_follow_wake_unknown_is_reported_once_and_blocks_ack(self):
+        leading = registry.append_event("worker_phase", {})
+        unknown = registry.append_event("future_kind", {"state": "running"})
+        registry.append_event("action_delivered", {})
+        code, output = self.wake_once(compact=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(output, json.dumps({"state": "unknown_event", "seq": unknown, "kind": "future_kind"}) + "\n")
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], leading)
+        self.assertEqual(registry.load()["lanes"]["main"]["woken_through"], unknown)
+        with mock.patch.object(registry, "ack") as ack:
+            self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        ack.assert_not_called()
+        newer = registry.append_event("future_kind", {})
+        code, output = self.wake_once()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output), {"state": "unknown_event", "seq": newer, "kind": "future_kind"})
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], leading)
+
+    def test_follow_wake_does_not_rewake_or_ack_past_unhandled_actionable_events(self):
+        registry.append_event("worker_state", {"state": "question"})
+        previous = registry.append_event("worker_state", {"state": "done"})
+        registry.append_event("worker_phase", {})
+        registry.update(lambda doc: doc["lanes"]["main"].update(woken_through=previous, woken_at=time.time(),
+                                                                 woken_by=None))
+        with mock.patch.object(registry, "ack") as ack:
+            self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        ack.assert_not_called()
+        newer = registry.append_event("worker_state", {"state": "stalled"})
+        with mock.patch.object(registry, "ack") as ack:
+            code, output = self.wake_once()
+        self.assertEqual(code, 0)
+        self.assertEqual([json.loads(line)["seq"] for line in output.splitlines()], [newer])
+        ack.assert_not_called()
+        current = registry.load()["lanes"]["main"]
+        self.assertEqual(current["ack_seq"], 0)
+        self.assertEqual(current["woken_through"], newer)
+        registry.ack(newer)
+        trailing = registry.append_event("worker_phase", {})
+        self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], trailing)
+
+    def test_follow_wake_rewakes_an_unacked_event_after_a_pause_or_for_another_session(self):
+        question = registry.append_event("worker_state", {"state": "question"})
+        for woken_at, woken_by in ((time.time() - watch.WAKE_SUPPRESS_SECONDS - 1, None),
+                                   (time.time(), "another-session"),
+                                   (time.time() + 3600, None)):  # a clock moved back never extends suppression
+            with self.subTest(woken_at=woken_at, woken_by=woken_by):
+                registry.update(lambda doc: doc["lanes"]["main"].update(
+                    woken_through=question, woken_at=woken_at, woken_by=woken_by))
+                code, output = self.wake_once()
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(output)["seq"], question)
+
+    def test_follow_wake_waiting_background_requires_final_message(self):
+        registry.append_event("worker_state", {"state": "waiting_background"})
+        empty = registry.append_event("worker_state", {"state": "waiting_background", "final_message": ""})
+        self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], empty)
+        asked = registry.append_event("worker_state", {"state": "waiting_background", "final_message": "A or B?"})
+        code, output = self.wake_once()
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["seq"], asked)
+        self.assertEqual(json.loads(output)["payload"]["final_message"], "A or B?")
+        self.assertEqual(registry.load()["lanes"]["main"]["ack_seq"], empty)
+
+    def test_follow_wake_keeps_polling_until_a_new_actionable_event(self):
+        old = registry.append_event("worker_state", {"state": "question"})
+        registry.update(lambda doc: doc["lanes"]["main"].update(woken_through=old, woken_at=time.time(), woken_by=None))
+        arrivals = iter((("worker_phase", {}), ("worker_state", {"state": "done"})))
+
+        def next_poll(interval):
+            kind, payload = next(arrivals)
+            registry.append_event(kind, payload)
+
+        with mock.patch.object(watch, "watcher_alive", return_value=True), \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch.object(watch.time, "sleep", side_effect=next_poll) as sleep, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(watch.follow(wake=True, interval=0.25), 0)
+        self.assertEqual(sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
+        self.assertEqual([json.loads(line)["seq"] for line in output.getvalue().splitlines()], [old + 2])
+        current = registry.load()["lanes"]["main"]
+        self.assertEqual(current["ack_seq"], 0)
+        self.assertEqual(current["woken_through"], old + 2)
+        self.assertIsNone(current["follow_lease"])
+
+    def test_follow_wake_tracks_each_lane_independently(self):
+        self.seo_worker()
+        leading = registry.append_event("issue_refused", {}, caller_lane="main")
+        private = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        code, output = self.wake_once(lane="seo")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["seq"], private)
+        current = registry.load()["lanes"]
+        self.assertEqual(current["main"]["ack_seq"], leading)
+        self.assertNotIn("woken_through", current["main"])
+        self.assertEqual(current["seo"]["ack_seq"], 0)
+        self.assertEqual(current["seo"]["woken_through"], private)
+        shared = registry.append_event("watcher_exit", {"detail": "stopped"})
+        for lane in ("main", "seo"):
+            with self.subTest(lane=lane):
+                code, output = self.wake_once(lane=lane)
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(output)["seq"], shared)
+                self.assertEqual(registry.load()["lanes"][lane]["woken_through"], shared)
+
+    def test_follow_wake_stdout_failure_leaves_action_unacked_and_unwoken(self):
+        for kind in ("worker_state", "future_kind"):
+            with self.subTest(kind=kind), mock.patch.dict(os.environ, {
+                    "HERDR_COORD_HOME": str(Path(self.temp.name) / kind)}):
+                seq = registry.append_event(kind, {"state": "question"})
+                for error in (BrokenPipeError("closed"), OSError("write failed"), TimeoutError("write timed out")):
+                    with self.subTest(error=error), \
+                            mock.patch.object(watch, "watcher_alive", return_value=True), \
+                            mock.patch.object(watch, "watcher_slow", return_value=False), \
+                            mock.patch.object(watch.time, "sleep", side_effect=AssertionError("must exit")), \
+                            mock.patch("sys.stdout") as output:
+                        output.write.side_effect = error
+                        self.assertEqual(watch.follow(wake=True), 1)
+                    self.assertEqual(json.loads(output.write.call_args.args[0])["seq"], seq)
+                    current = registry.load()["lanes"]["main"]
+                    self.assertEqual(current["ack_seq"], 0)
+                    self.assertNotIn("woken_through", current)
+                    self.assertIsNone(current["follow_lease"])
+
+    def test_follow_wake_retries_wake_record_without_printing_unknown_twice(self):
+        seq = registry.append_event("future_kind", {})
+        update = registry.update
+        attempts = []
+
+        def contend(fn):
+            if fn.__name__ == "record_wake":
+                attempts.append(True)
+                if len(attempts) == 1:
+                    raise TimeoutError("registry busy")
+            return update(fn)
+
+        with mock.patch.object(registry, "update", side_effect=contend), \
+                mock.patch.object(watch, "watcher_alive", return_value=True), \
+                mock.patch.object(watch, "watcher_slow", return_value=False), \
+                mock.patch.object(watch.time, "sleep", side_effect=[None, KeyboardInterrupt]) as sleep, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(watch.follow(wake=True, interval=0.25), 0)
+        sleep.assert_called_once_with(0.25)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        self.assertEqual(registry.load()["lanes"]["main"]["woken_through"], seq)
+
+    def test_cli_follow_wake_flag(self):
+        with mock.patch.object(watch, "follow", return_value=0) as follow:
+            self.assertEqual(herdr_coord.main(["follow", "--wake", "--compact", "--interval", "0.25"]), 0)
+        follow.assert_called_once_with(interval=0.25, lane="main", context=self.outside_context(),
+                                       wake=True, compact=True)
+
     def test_follow_compact_projects_metadata_and_omits_prose(self):
         metadata = {"issue": 21, "state": "question", "agent_name": "repo-21-abcd",
                     "worker_id": "worker", "state_token": "a" * 32,
@@ -3095,24 +3422,81 @@ class WatchTests(unittest.TestCase):
         with mock.patch.object(watch, "_poll_worker"), mock.patch.object(watch, "_drain"):
             return watch.poll_once(ops=self.ops, now=now)
 
-    def test_unattended_alert_repeats_hourly_and_ack_clears(self):
+    def test_unattended_alert_fires_once_per_actionable_backlog_and_ack_clears(self):
         self.seo_worker()
         question = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
         self.unattended_poll(100)
         self.assertEqual(registry.load()["lanes"]["seo"]["unattended_since"], 100)
         self.assertEqual(self.unattended_poll(999), [])
-        first = self.unattended_poll(100 + 16 * 60)
+        first = self.unattended_poll(100 + 15 * 60)
         self.assertEqual([e["kind"] for e in first], ["lane_unattended"])
         self.assertEqual(first[0]["scope"], "repo")
         self.assertEqual(first[0]["payload"]["lane"], "seo")
+        self.assertEqual(registry.load()["lanes"]["seo"]["unattended_alerted_seq"], question)
         self.assertEqual(self.unattended_poll(100 + 26 * 60), [])
-        self.assertEqual([e["kind"] for e in self.unattended_poll(100 + 77 * 60)], ["lane_unattended"])
+        self.assertEqual(self.unattended_poll(100 + 77 * 60), [])
         registry.ack(question, lane="seo")
         self.assertEqual(self.unattended_poll(100 + 138 * 60), [])
         lane = registry.load()["lanes"]["seo"]
         self.assertIsNone(lane["unattended_since"])
         self.assertIsNone(lane["last_alert_at"])
-        self.assertEqual(sum("seo" in n[2] and "unattended" in n[2] for n in self.ops.notifications), 2)
+        self.assertEqual(sum("seo" in n[2] and "unattended" in n[2] for n in self.ops.notifications), 1)
+
+    def test_all_bookkeeping_backlog_never_makes_lane_unattended(self):
+        self.seo_worker()
+        for kind in sorted(registry.BOOKKEEPING_EVENT_KINDS - {"watcher_slow"}):
+            registry.append_event(kind, {"worker_id": "worker"})
+        for state in ("running", "in_tool", "starting", "waiting_background", "awaiting_checks"):
+            registry.append_event("worker_state", {"worker_id": "worker", "state": state})
+        registry.append_event("technical_problem", {"worker_id": "worker", "failed_iterations": 1})
+        registry.append_event("action_superseded", {"worker_id": "worker", "kind": "nudge"})
+        registry.update(lambda doc: doc["lanes"]["seo"].update(unattended_since=1, last_alert_at=1))
+        for now in (100, 1000, 5000):
+            self.assertEqual(self.unattended_poll(now), [])
+        lane = registry.load()["lanes"]["seo"]
+        self.assertIsNone(lane["unattended_since"])
+        self.assertIsNone(lane["last_alert_at"])
+        self.assertFalse(self.ops.notifications)
+
+    def test_newer_actionable_event_alerts_again_but_bookkeeping_does_not(self):
+        self.seo_worker()
+        registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.unattended_poll(100)
+        self.assertEqual([e["kind"] for e in self.unattended_poll(1000)], ["lane_unattended"])
+        registry.append_event("session_changed", {"worker_id": "worker"})
+        registry.append_event("worker_state", {"worker_id": "worker", "state": "running"})
+        self.assertEqual(self.unattended_poll(5000), [])
+        newer = registry.append_event("worker_state", {"worker_id": "worker", "state": "done"})
+        self.assertEqual([e["kind"] for e in self.unattended_poll(5001)], ["lane_unattended"])
+        self.assertEqual(registry.load()["lanes"]["seo"]["unattended_alerted_seq"], newer)
+        self.assertEqual(self.unattended_poll(9000), [])
+
+    def test_unknown_lane_event_without_worker_id_counts_as_actionable_for_unattended(self):
+        unknown = registry.append_event("future_action_needed", {})
+        self.unattended_poll(100)
+        events = self.unattended_poll(1000)
+        self.assertEqual([e["kind"] for e in events], ["lane_unattended"])
+        self.assertEqual(events[0]["payload"]["lane"], "main")
+        self.assertEqual(registry.load()["lanes"]["main"]["unattended_alerted_seq"], unknown)
+        self.assertEqual(self.unattended_poll(5000), [])
+
+    def test_live_follow_clears_timer_and_a_later_lapse_alerts_again(self):
+        self.seo_worker()
+        question = registry.append_event("worker_state", {"worker_id": "worker", "state": "question"})
+        self.unattended_poll(100)
+        self.assertEqual([e["kind"] for e in self.unattended_poll(1000)], ["lane_unattended"])
+        lease = watch._claim_follow("seo", now=1001, context=self.seo_context)
+        # Simulate the live follower arriving after the timer was set by an earlier poll.
+        registry.update(lambda doc: doc["lanes"]["seo"].update(unattended_since=100))
+        self.assertEqual(self.unattended_poll(1002), [])
+        lane = registry.load()["lanes"]["seo"]
+        self.assertIsNone(lane["unattended_since"])
+        self.assertNotIn("unattended_alerted_seq", lane)  # attended again: a later lapse alerts afresh
+        watch._release_follow("seo", lease)
+        self.assertEqual(self.unattended_poll(1100), [])
+        self.assertEqual([e["kind"] for e in self.unattended_poll(2000)], ["lane_unattended"])
+        self.assertEqual(registry.load()["lanes"]["seo"]["unattended_alerted_seq"], question)
+        self.assertEqual(self.unattended_poll(5000), [])
 
     def test_old_question_with_recently_departed_follower_is_not_unattended(self):
         self.seo_worker()

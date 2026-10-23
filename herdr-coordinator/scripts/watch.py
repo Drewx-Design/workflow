@@ -42,6 +42,8 @@ REOPENABLE_STATES = {"done", "awaiting_merge"}  # settled, but the user may keep
 BACKGROUND_LIVE_MAX_SECONDS = 6 * 60 * 60
 # A dismiss-and-answer relay waits up to actions.DISMISS_TIMEOUT for the form to close, then types.
 DISMISS_SETTLE_SECONDS = 120
+# How long follow --wake skips events that already woke the same coordinator session.
+WAKE_SUPPRESS_SECONDS = 10 * 60
 # Producer captures: tests/fixtures/herdr-agent-read-visible.txt ("· 3 shells · … · ← 1 agent ·") and
 # live footers of 2026-10-19. "← 1 agent" is on every pane, idle ones included, so only shells count.
 _FOOTER_SHELLS = re.compile(r"(?:^|·\s*)(\d+)\s+shells?(?=\s*(?:·|$))")
@@ -351,6 +353,9 @@ def _herdr_lost(now):
 
 def _notification(event, worker=None) -> tuple[str, str] | None:
     payload = event["payload"]
+    if (event["kind"] == "worker_state" and payload.get("typed_turn")
+            and payload.get("state") in {"question", "ended_without_proof", "done", "waiting_background"}):
+        return None
     title = body = None
     if event["kind"] == "herdr_lost":
         title = "herdr recovered; workers held"
@@ -716,7 +721,7 @@ def _reopen_if_in_use(worker, ops, now):
     if _answered_prompt(records):
         actions.change_worker(worker["worker_id"], "running", now=now, expected=settled_state,
                               expected_token=settled_token,
-                              reason="new prompt typed in the pane")
+                              reason="new prompt typed in the pane", typed_turn=True)
 
 
 def _poll_worker(worker, ops, now, keepalive=None):
@@ -952,16 +957,23 @@ def _check_unattended(now):
 
     def check(doc, events):
         for name, lane in doc["lanes"].items():
-            unhandled = any(event["seq"] > lane["ack_seq"] and name in (registry.event_lanes(event) or ())
-                            and event["payload"].get("worker_id") for event in pending)
-            if not unhandled or follower_alive(name, lane.get("follow_lease"), now=now):
+            unhandled_seq = max((event["seq"] for event in pending
+                                 if event["seq"] > lane["ack_seq"]
+                                 and name in (registry.event_lanes(event) or ())
+                                 and (registry.event_actionable(event) or event["kind"] not in (
+                                     registry.ACTIONABLE_EVENT_KINDS | registry.BOOKKEEPING_EVENT_KINDS))),
+                                default=0)
+            if not unhandled_seq or follower_alive(name, lane.get("follow_lease"), now=now):
+                # Attended again: a later lapse alerts afresh, even for an event already alerted.
                 lane.update(unattended_since=None, last_alert_at=None)
+                lane.pop("unattended_alerted_seq", None)
                 continue
             if lane.get("unattended_since") is None:
                 lane["unattended_since"] = now
-            if now - lane["unattended_since"] >= 15 * 60 and (
-                    lane.get("last_alert_at") is None or now - lane["last_alert_at"] >= 60 * 60):
+            if (now - lane["unattended_since"] >= 15 * 60
+                    and unhandled_seq > lane.get("unattended_alerted_seq", 0)):
                 lane["last_alert_at"] = now
+                lane["unattended_alerted_seq"] = unhandled_seq
                 events.append(("lane_unattended", {"lane": name, "ts": now}))
 
     registry.update_with_events(check)
@@ -1084,9 +1096,10 @@ def _compact_line(event, *, lane="main"):
     return line
 
 
-def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None):
+def follow(*, interval=5, compact=False, quiet=False, wake=False, lane="main", context=None):
     if interval <= 0:
         raise ValueError("interval must be positive")
+    quiet = quiet or wake
     parent_pid = os.getppid()
     try:
         parent = start._process_identity(parent_pid)
@@ -1104,6 +1117,8 @@ def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None)
     reported_loss = False
     reported_slow = False
     reported_hung = False
+    woken_seq = None
+    controller_value = ((context or {}).get("controller") or {}).get("value")
     try:
         while True:
             now = time.time()
@@ -1157,18 +1172,65 @@ def follow(*, interval=5, compact=False, quiet=False, lane="main", context=None)
                     reported_loss = True
                     reported_slow = False
                     reported_hung = False
-                cursor = max(cursor, registry.load()["lanes"][lane]["ack_seq"])
-                for event in registry.read_events(cursor, lane=lane):
-                    # A background wait is routine unless the turn ended with text, which may be a question.
-                    if not (quiet and event["kind"] == "worker_state"
-                            and event["payload"].get("state") in {"running", "in_tool", "waiting_background"}
-                            and not (event["payload"].get("state") == "waiting_background"
-                                     and event["payload"].get("final_message"))):
-                        try:
-                            print(_compact_line(event, lane=lane) if compact else json.dumps(event, ensure_ascii=False), flush=True)
-                        except OSError:
-                            return 1
-                    cursor = event["seq"]
+                current = registry.load()["lanes"][lane]
+                cursor = max(cursor, current["ack_seq"])
+                if wake:
+                    if woken_seq is None:
+                        events = registry.read_events(cursor, lane=lane)
+                        leading = True
+                        leading_seq = None
+                        wake_indexes = []
+                        known_kinds = registry.ACTIONABLE_EVENT_KINDS | registry.BOOKKEEPING_EVENT_KINDS
+                        # A relaunch by the same session soon after a wake is not woken again for the
+                        # same events. A crash, a takeover or a long pause gets them again, so an
+                        # unacknowledged question is never hidden for good.
+                        suppressed_through = (current.get("woken_through", 0)
+                                              if current.get("woken_by") == controller_value
+                                              and 0 <= now - current.get("woken_at", 0) < WAKE_SUPPRESS_SECONDS
+                                              else 0)
+                        for index, event in enumerate(events):
+                            if event["kind"] not in known_kinds or registry.event_actionable(event):
+                                leading = False
+                                if event["seq"] > suppressed_through:
+                                    wake_indexes.append(index)
+                            elif leading:
+                                leading_seq = event["seq"]
+                        if leading_seq is not None:
+                            registry.ack(leading_seq, lane=lane)
+                        if wake_indexes:
+                            batch = events[wake_indexes[0]:wake_indexes[-1] + 1]
+                            for event in batch:
+                                if event["kind"] not in known_kinds:
+                                    line = json.dumps({"state": "unknown_event", "seq": event["seq"],
+                                                       "kind": event["kind"]})
+                                else:
+                                    line = (_compact_line(event, lane=lane) if compact
+                                            else json.dumps(event, ensure_ascii=False))
+                                try:
+                                    print(line, flush=True)
+                                except OSError:
+                                    return 1
+                            woken_seq = batch[-1]["seq"]
+                    if woken_seq is not None:
+                        # Optional v3 lane field; retry a contended save without printing twice.
+                        def record_wake(doc):
+                            current = doc["lanes"][lane]
+                            current.update(woken_through=woken_seq, woken_at=now, woken_by=controller_value)
+
+                        registry.update(record_wake)
+                        return 0
+                else:
+                    for event in registry.read_events(cursor, lane=lane):
+                        # A background wait is routine unless the turn ended with text, which may be a question.
+                        if not (quiet and event["kind"] == "worker_state"
+                                and event["payload"].get("state") in {"running", "in_tool", "waiting_background"}
+                                and not (event["payload"].get("state") == "waiting_background"
+                                         and event["payload"].get("final_message"))):
+                            try:
+                                print(_compact_line(event, lane=lane) if compact else json.dumps(event, ensure_ascii=False), flush=True)
+                            except OSError:
+                                return 1
+                        cursor = event["seq"]
             except TimeoutError:
                 pass  # Contention delays the event or its replay until the next interval.
             time.sleep(min(interval, 30))

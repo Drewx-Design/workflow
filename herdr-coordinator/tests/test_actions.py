@@ -953,6 +953,42 @@ class ActionTests(unittest.TestCase):
             with self.subTest(result=result), mock.patch.object(self.ops, "herdr", return_value=result):
                 self.assertEqual(actions.visible_text(self.worker, self.ops, default="unavailable"), expected)
 
+    def test_coordinator_sends_clear_typed_turn_before_delivery(self):
+        original = self.ops.herdr
+        sends = []
+
+        def inspect_send(*args, **kwargs):
+            if args[:2] in {("agent", "prompt"), ("agent", "send-keys"), ("pane", "send-text")}:
+                self.assertFalse(actions.worker_named("worker").get("typed_turn"))
+                sends.append(args)
+            return original(*args, **kwargs)
+
+        cases = (("relay", "ended_without_proof"), ("relay", "question"), ("nudge", "running"),
+                 ("resume", "quota_wait"), ("resume", "lost"))
+        with mock.patch.object(self.ops, "herdr", side_effect=inspect_send):
+            for kind, state in cases:
+                with self.subTest(kind=kind, state=state):
+                    token = f"{kind}-{state}"
+                    self.set_state(state, typed_turn=True, state_token=token, pending_action_id=None)
+                    self.ops.statuses["worker"] = "blocked" if state == "question" else "idle"
+                    if kind == "relay":
+                        result = actions.relay("worker", "1", state_token=token, ops=self.ops)
+                    else:
+                        result = getattr(actions, kind)("worker", ops=self.ops)
+                    self.assertEqual(result["status"], "delivered")
+                    self.assertFalse(actions.worker_named("worker").get("typed_turn"))
+        self.assertEqual(len(sends), 6)  # The question relay sends an option and Enter.
+
+    def test_session_rotation_clears_typed_turn_but_same_session_preserves_it(self):
+        self.set_state("running", typed_turn=True)
+        worker = actions.worker_named("worker")
+        same = actions.refresh_session(worker, {"agent_session": {"value": "session-1"}}, now=100)
+        self.assertIs(same["typed_turn"], True)
+        rotated = actions.refresh_session(same, {"agent_session": {"value": "session-2"}}, now=101)
+        self.assertEqual(rotated["session_id"], "session-2")
+        self.assertFalse(rotated.get("typed_turn"))
+        self.assertFalse(actions.worker_named("worker").get("typed_turn"))
+
     def test_nudge_retry_is_not_new_action_but_same_wording_can_be_new(self):
         first = actions.nudge("worker", ops=self.ops, action_id="n1")
         self.assertEqual(first["status"], "delivered")

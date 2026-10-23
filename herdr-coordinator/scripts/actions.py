@@ -178,6 +178,7 @@ def refresh_session(worker, agent, *, now=None, lane=None):
                 history.append(value)
         current.update(session_id=session, transcript_offset=0, transcript_path=None,
                        last_growth_at=time.time() if now is None else now)
+        current.pop("typed_turn", None)
         pending_id = current.get("pending_action_id")
         pending = doc["actions"].get(pending_id, {})
         if pending.get("status") == "delivery_unknown" and pending.get("session_id") != session:
@@ -452,6 +453,7 @@ def _prepare(worker, kind, text, action_id, records, *, transport="prompt", rese
                 raise ActionError("Previous action delivery is unknown; it will not be retried")
         doc["actions"][action_id] = action
         current["pending_action_id"] = action_id
+        current.pop("typed_turn", None)
         events.append(("action_recorded", action))
         if reserve:
             current.update(state="starting", last_change=time.time(), state_token=uuid.uuid4().hex)
