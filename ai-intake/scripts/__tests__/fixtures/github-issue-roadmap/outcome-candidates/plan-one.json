@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "github-issue-roadmap-outcome-envelope/v1",
+  "repository": {
+    "organization": "example-org",
+    "name": "example-repo",
+    "databaseId": 123,
+    "nodeId": "R_repo"
+  },
+  "producer": { "kind": "plan", "version": "1" },
+  "artifact": {
+    "stableId": "plan:ai-managed-roadmap-intake",
+    "revisionSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceLocator": "docs/plans/ai-managed-roadmap-intake.md"
+  },
+  "candidates": [
+    {
+      "stableOutcomeId": "shared-outcome-contract",
+      "outcome": {
+        "title": "Adopt the shared outcome contract",
+        "completionRule": "Every registered producer emits a valid envelope.",
+        "affectedSystems": ["roadmap-intake", "producer-contract"]
+      },
+      "evidence": [
+        {
+          "id": "plan-contract",
+          "kind": "source_artifact",
+          "sourceLocator": "docs/plans/ai-managed-roadmap-intake.md",
+          "contentSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "provenance": [
+        {
+          "id": "plan-origin",
+          "sourceLocator": "docs/plans/ai-managed-roadmap-intake.md",
+          "contentSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "readiness": {
+        "independentlyCloseable": true,
+        "framingComplete": true,
+        "completionRuleDefined": true,
+        "evidenceSufficient": true,
+        "estimationSubstrate": true,
+        "unresolvedDecisionIds": [],
+        "dependencyIds": [],
+        "currentMainVerificationEvidenceId": null
+      },
+      "relationshipCandidates": [],
+      "suggestions": {
+        "type": { "value": "Feature", "confidence": "high", "rationale": "A new product capability." },
+        "priority": { "value": "P2", "confidence": "high", "rationale": "The roadmap contract is approved." },
+        "effort": { "value": "Medium", "confidence": "high", "rationale": "The implementation substrate is known." }
+      }
+    }
+  ]
+}

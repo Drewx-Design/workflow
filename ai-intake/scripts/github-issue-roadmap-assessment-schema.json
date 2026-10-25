@@ -1,0 +1,608 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "github-issue-roadmap-intake-assessment-contract/v1",
+  "title": "GitHub issue roadmap intake assessment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "candidateSha256",
+    "snapshotContentSha256",
+    "snapshotCoverageSha256",
+    "generatedAt",
+    "stack",
+    "candidates",
+    "attention"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "github-issue-roadmap-intake-assessment/v1"
+    },
+    "candidateSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "snapshotContentSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "snapshotCoverageSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "generatedAt": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "stack": {
+      "$ref": "#/$defs/assessmentStack"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/candidateAssessment"
+      }
+    },
+    "attention": {
+      "$ref": "#/$defs/attention"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{64}$"
+    },
+    "stableIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "confidence": {
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "evidenceIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stableIdentifier"
+      }
+    },
+    "assessmentStack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model",
+        "promptSha256",
+        "rubricSha256",
+        "toolchainSha256",
+        "calibrationRelease"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "model": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "promptSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rubricSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "toolchainSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "calibrationRelease": {
+          "$ref": "#/$defs/stableIdentifier"
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "confidence",
+        "canonicalIssueNumber",
+        "competingIssueNumbers",
+        "evidenceIds",
+        "rationale"
+      ],
+      "properties": {
+        "result": {
+          "enum": [
+            "replay",
+            "exact_match",
+            "plausible_overlap",
+            "clearly_novel",
+            "invalid"
+          ]
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "canonicalIssueNumber": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "competingIssueNumbers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "evidenceIds": {
+          "$ref": "#/$defs/evidenceIds"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "enum": [
+                  "replay",
+                  "exact_match"
+                ]
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "canonicalIssueNumber": {
+                "$ref": "#/$defs/positiveInteger"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "canonicalIssueNumber": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "plausible_overlap"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "competingIssueNumbers": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "clearly_novel"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "competingIssueNumbers": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "assessedType": {
+      "$ref": "#/$defs/assessedValueBase",
+      "properties": {
+        "value": {
+          "enum": [
+            "Bug",
+            "Feature",
+            "Task",
+            null
+          ]
+        }
+      }
+    },
+    "assessedPriority": {
+      "$ref": "#/$defs/assessedValueBase",
+      "properties": {
+        "value": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3",
+            null
+          ]
+        }
+      }
+    },
+    "assessedEffort": {
+      "$ref": "#/$defs/assessedValueBase",
+      "properties": {
+        "value": {
+          "enum": [
+            "Low",
+            "Medium",
+            "High",
+            null
+          ]
+        }
+      }
+    },
+    "assessedHorizon": {
+      "$ref": "#/$defs/assessedValueBase",
+      "properties": {
+        "value": {
+          "enum": [
+            "Now",
+            "Next",
+            "Later",
+            "Parked",
+            null
+          ]
+        }
+      }
+    },
+    "assessedValueBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "confidence",
+        "evidenceIds",
+        "rationale"
+      ],
+      "properties": {
+        "value": true,
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidenceIds": {
+          "$ref": "#/$defs/evidenceIds"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "priority",
+        "effort",
+        "horizon"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/assessedType"
+        },
+        "priority": {
+          "$ref": "#/$defs/assessedPriority"
+        },
+        "effort": {
+          "$ref": "#/$defs/assessedEffort"
+        },
+        "horizon": {
+          "$ref": "#/$defs/assessedHorizon"
+        }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "targetIssueNumber",
+        "conflict",
+        "confidence",
+        "evidenceIds",
+        "rationale"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "parent",
+            "blocks",
+            "blocked_by",
+            "related"
+          ]
+        },
+        "targetIssueNumber": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "conflict": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "evidenceIds": {
+          "$ref": "#/$defs/evidenceIds"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "candidateAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceFingerprint",
+        "emissionContentSha256",
+        "match",
+        "classification",
+        "relationships",
+        "completionContradicted"
+      ],
+      "properties": {
+        "sourceFingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "emissionContentSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "match": {
+          "$ref": "#/$defs/match"
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relationship"
+          }
+        },
+        "completionContradicted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "attention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issueNumber",
+        "evidenceRefresh",
+        "decision",
+        "tradeoff",
+        "evidenceIds",
+        "rationale"
+      ],
+      "properties": {
+        "issueNumber": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceRefresh": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tradeoff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceIds": {
+          "$ref": "#/$defs/evidenceIds"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "issueNumber": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "issueNumber"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "evidenceRefresh": {
+                    "$ref": "#/$defs/nonEmptyString"
+                  },
+                  "decision": {
+                    "type": "null"
+                  },
+                  "tradeoff": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "evidenceRefresh": {
+                    "type": "null"
+                  },
+                  "decision": {
+                    "$ref": "#/$defs/nonEmptyString"
+                  },
+                  "tradeoff": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "evidenceRefresh": {
+                    "type": "null"
+                  },
+                  "decision": {
+                    "type": "null"
+                  },
+                  "tradeoff": {
+                    "$ref": "#/$defs/nonEmptyString"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "x-runtimeInvariants": [
+    "generatedAt must be accepted by Date.parse and is normalized to an ISO timestamp.",
+    "candidateSha256 must equal the canonical envelope hash and snapshot candidateSha256.",
+    "snapshotContentSha256 and snapshotCoverageSha256 must equal the bound snapshot hashes.",
+    "stack must equal the request's exact six-field assessmentStack.",
+    "candidates must contain exactly one entry for every bound sourceFingerprint, with its exact emissionContentSha256.",
+    "Every canonical, competing, or attention issue number that the production parser bounds must exist in the snapshot.",
+    "Every evidence ID must exist in the bound envelope or snapshot.",
+    "All non-empty strings are trimmed and CRLF is normalized before the parsed assessment is sealed."
+  ],
+  "x-canonicalSkeleton": {
+    "schemaVersion": "github-issue-roadmap-intake-assessment/v1",
+    "candidateSha256": "$candidateSha256",
+    "snapshotContentSha256": "$snapshotContentSha256",
+    "snapshotCoverageSha256": "$snapshotCoverageSha256",
+    "generatedAt": "$generatedAt",
+    "stack": {
+      "provider": "$stack.provider",
+      "model": "$stack.model",
+      "promptSha256": "$stack.promptSha256",
+      "rubricSha256": "$stack.rubricSha256",
+      "toolchainSha256": "$stack.toolchainSha256",
+      "calibrationRelease": "$stack.calibrationRelease"
+    },
+    "candidates": [
+      {
+        "sourceFingerprint": "$candidate.sourceFingerprint",
+        "emissionContentSha256": "$candidate.emissionContentSha256",
+        "match": {
+          "result": "clearly_novel",
+          "confidence": "high",
+          "canonicalIssueNumber": null,
+          "competingIssueNumbers": [],
+          "evidenceIds": [
+            "$candidate.evidenceId"
+          ],
+          "rationale": "$candidate.matchRationale"
+        },
+        "classification": {
+          "type": {
+            "value": null,
+            "confidence": "high",
+            "evidenceIds": [
+              "$candidate.evidenceId"
+            ],
+            "rationale": "$candidate.typeRationale"
+          },
+          "priority": {
+            "value": null,
+            "confidence": "high",
+            "evidenceIds": [
+              "$candidate.evidenceId"
+            ],
+            "rationale": "$candidate.priorityRationale"
+          },
+          "effort": {
+            "value": null,
+            "confidence": "high",
+            "evidenceIds": [
+              "$candidate.evidenceId"
+            ],
+            "rationale": "$candidate.effortRationale"
+          },
+          "horizon": {
+            "value": null,
+            "confidence": "high",
+            "evidenceIds": [
+              "$candidate.evidenceId"
+            ],
+            "rationale": "$candidate.horizonRationale"
+          }
+        },
+        "relationships": [],
+        "completionContradicted": false
+      }
+    ],
+    "attention": {
+      "issueNumber": null,
+      "evidenceRefresh": "$attention.evidenceRefresh",
+      "decision": null,
+      "tradeoff": null,
+      "evidenceIds": [
+        "$attention.evidenceId"
+      ],
+      "rationale": "$attention.rationale"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "@workflow-tools/ai-intake",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.20.0 || >=22.22.0"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "roadmap:candidate": "tsx scripts/github-issue-roadmap-intake-candidate.ts",
+    "roadmap:intake": "tsx scripts/github-issue-roadmap-intake.ts",
+    "roadmap:file-finding": "tsx scripts/github-issue-roadmap-file-finding.ts",
+    "roadmap:intake-preflight": "tsx scripts/github-issue-roadmap-intake-preflight.ts",
+    "roadmap:intake-assess": "tsx scripts/github-issue-roadmap-intake-assess.ts",
+    "roadmap:intake-approve": "tsx scripts/github-issue-roadmap-intake-approve.ts",
+    "roadmap:intake-apply": "tsx scripts/github-issue-roadmap-intake-apply.ts",
+    "roadmap:intake-holds": "tsx scripts/github-issue-roadmap-intake-holds.ts",
+    "roadmap:intake-resolve": "tsx scripts/github-issue-roadmap-intake-resolve.ts",
+    "roadmap:intake-drain": "tsx scripts/github-issue-roadmap-intake-drain.ts",
+    "roadmap:existence-probe": "tsx scripts/github-issue-roadmap-existence-probe.ts",
+    "roadmap:judge": "tsx scripts/github-issue-roadmap-judge.ts",
+    "roadmap:label-panel": "tsx scripts/github-issue-roadmap-label-panel.ts"
+  },
+  "dependencies": {
+    "zod": "4.3.6",
+    "ts-morph": "28.0.0"
+  },
+  "devDependencies": {
+    "tsx": "4.21.0",
+    "vitest": "4.1.1",
+    "typescript": "5.9.3",
+    "@types/node": "25.5.0",
+    "vite": "8.0.2"
+  }
+}

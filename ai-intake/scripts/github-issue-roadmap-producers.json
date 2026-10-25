@@ -1,0 +1,131 @@
+{
+  "schemaVersion": "github-issue-roadmap-producer-registry/v1",
+  "cutover": {
+    "status": "effective",
+    "effectiveAt": "2026-08-24T00:36:12.000Z"
+  },
+  "recallSoak": {
+    "status": "pending",
+    "requiredArtifactCount": 20,
+    "reviewedArtifactCount": 0,
+    "missedCloseableOutcomeCount": null,
+    "evidenceLocator": null
+  },
+  "authorizedIdentityMappings": [],
+  "producers": [
+    {
+      "kind": "plan",
+      "active": true,
+      "artifactGlobs": ["docs/plans/**/*.md"],
+      "completionPoint": "After ce-plan finalization, confidence scoring, and document review, before the completion handoff.",
+      "stableArtifactIdentity": "outcome_envelope.artifact.stableId: a durable semantic plan ID preserved across rename",
+      "stableOutcomeIdentity": "outcome_envelope.candidates[].stableOutcomeId: a semantic independently closeable outcome ID, never an array ordinal",
+      "sidecar": { "storageRoot": "artifacts/github-issue-roadmap", "naming": "percent_encode_source_locator", "prefix": "outcome-candidate--", "suffix": ".roadmap-outcomes.json" },
+      "envelopeWriter": "npm run roadmap:candidate -- --in=<draft-json> --out=artifacts/github-issue-roadmap/outcome-candidate--<percent-encoded-source-locator>.roadmap-outcomes.json",
+      "failureBehavior": "fail_completion_handoff",
+      "budgets": {
+        "maxCandidatesPerEnvelope": 5,
+        "maxEnvelopeBytes": 65536,
+        "maxCandidateBytes": 16384,
+        "maxActionPayloadBytes": 16384
+      },
+      "privacyProfile": "repository_artifact",
+      "conformanceFixture": "scripts/__tests__/github-issue-roadmap-outcome-candidate.test.ts"
+    },
+    {
+      "kind": "brainstorm",
+      "active": true,
+      "artifactGlobs": ["docs/brainstorms/**/*.md"],
+      "completionPoint": "After the ce-brainstorm Product Contract is accepted, before the completion handoff.",
+      "stableArtifactIdentity": "outcome_envelope.artifact.stableId: a durable semantic brainstorm ID preserved across rename",
+      "stableOutcomeIdentity": "outcome_envelope.candidates[].stableOutcomeId: a semantic independently closeable outcome ID, never an array ordinal",
+      "sidecar": { "storageRoot": "artifacts/github-issue-roadmap", "naming": "percent_encode_source_locator", "prefix": "outcome-candidate--", "suffix": ".roadmap-outcomes.json" },
+      "envelopeWriter": "npm run roadmap:candidate -- --in=<draft-json> --out=artifacts/github-issue-roadmap/outcome-candidate--<percent-encoded-source-locator>.roadmap-outcomes.json",
+      "failureBehavior": "fail_completion_handoff",
+      "budgets": {
+        "maxCandidatesPerEnvelope": 5,
+        "maxEnvelopeBytes": 65536,
+        "maxCandidateBytes": 16384,
+        "maxActionPayloadBytes": 16384
+      },
+      "privacyProfile": "repository_artifact",
+      "conformanceFixture": "scripts/__tests__/github-issue-roadmap-outcome-candidate.test.ts"
+    },
+    {
+      "kind": "ideation",
+      "active": true,
+      "artifactGlobs": ["docs/ideation/**/*.{md,html}"],
+      "completionPoint": "After Markdown or HTML ideation output is saved and its evaluated outcomes are stable, before the completion handoff.",
+      "stableArtifactIdentity": "outcome_envelope.artifact.stableId: a durable semantic ideation ID preserved across format or path rename",
+      "stableOutcomeIdentity": "outcome_envelope.candidates[].stableOutcomeId: a semantic independently closeable outcome ID, never an array ordinal",
+      "sidecar": { "storageRoot": "artifacts/github-issue-roadmap", "naming": "percent_encode_source_locator", "prefix": "outcome-candidate--", "suffix": ".roadmap-outcomes.json" },
+      "envelopeWriter": "npm run roadmap:candidate -- --in=<draft-json> --out=artifacts/github-issue-roadmap/outcome-candidate--<percent-encoded-source-locator>.roadmap-outcomes.json",
+      "failureBehavior": "fail_completion_handoff",
+      "budgets": {
+        "maxCandidatesPerEnvelope": 5,
+        "maxEnvelopeBytes": 65536,
+        "maxCandidateBytes": 16384,
+        "maxActionPayloadBytes": 16384
+      },
+      "privacyProfile": "repository_artifact",
+      "conformanceFixture": "scripts/__tests__/github-issue-roadmap-outcome-candidate.test.ts"
+    },
+    {
+      "kind": "audit",
+      "active": true,
+      "artifactGlobs": ["docs/audits/**/*.md"],
+      "completionPoint": "After a nested audit records findings and dispositions, before the audit completion handoff.",
+      "stableArtifactIdentity": "outcome_envelope.artifact.stableId: a durable semantic audit ID preserved across nested-path rename",
+      "stableOutcomeIdentity": "outcome_envelope.candidates[].stableOutcomeId: a semantic independently closeable finding ID, never an array ordinal",
+      "sidecar": { "storageRoot": "artifacts/github-issue-roadmap", "naming": "percent_encode_source_locator", "prefix": "outcome-candidate--", "suffix": ".roadmap-outcomes.json" },
+      "envelopeWriter": "npm run roadmap:candidate -- --in=<draft-json> --out=artifacts/github-issue-roadmap/outcome-candidate--<percent-encoded-source-locator>.roadmap-outcomes.json",
+      "failureBehavior": "fail_completion_handoff",
+      "budgets": {
+        "maxCandidatesPerEnvelope": 5,
+        "maxEnvelopeBytes": 65536,
+        "maxCandidateBytes": 16384,
+        "maxActionPayloadBytes": 16384
+      },
+      "privacyProfile": "repository_artifact",
+      "conformanceFixture": "scripts/__tests__/github-issue-roadmap-outcome-candidate.test.ts"
+    },
+    {
+      "kind": "implementation_discovery",
+      "active": true,
+      "artifactGlobs": ["docs/discovery/**/*.md"],
+      "completionPoint": "When implementation work discovers a durable independently closeable outcome, before the implementation handoff.",
+      "stableArtifactIdentity": "outcome_envelope.artifact.stableId: a durable semantic discovery ID preserved across rename",
+      "stableOutcomeIdentity": "outcome_envelope.candidates[].stableOutcomeId: a semantic independently closeable discovery ID, never an array ordinal",
+      "sidecar": { "storageRoot": "artifacts/github-issue-roadmap", "naming": "percent_encode_source_locator", "prefix": "outcome-candidate--", "suffix": ".roadmap-outcomes.json" },
+      "envelopeWriter": "npm run roadmap:candidate -- --in=<draft-json> --out=artifacts/github-issue-roadmap/outcome-candidate--<percent-encoded-source-locator>.roadmap-outcomes.json",
+      "failureBehavior": "fail_completion_handoff",
+      "budgets": {
+        "maxCandidatesPerEnvelope": 5,
+        "maxEnvelopeBytes": 65536,
+        "maxCandidateBytes": 16384,
+        "maxActionPayloadBytes": 16384
+      },
+      "privacyProfile": "repository_artifact",
+      "conformanceFixture": "scripts/__tests__/github-issue-roadmap-outcome-candidate.test.ts"
+    },
+    {
+      "kind": "future_user_bug",
+      "active": false,
+      "artifactGlobs": ["artifacts/github-issue-roadmap/user-bugs/**/*.json"],
+      "completionPoint": "Inactive until a future user bug submission surface defines its privacy-safe durable handoff.",
+      "stableArtifactIdentity": "outcome_envelope.artifact.stableId: a privacy-safe report fingerprint with no user identity",
+      "stableOutcomeIdentity": "outcome_envelope.candidates[].stableOutcomeId: a semantic bug outcome ID with no user, replay, attachment, or lineage identity",
+      "sidecar": { "storageRoot": "artifacts/github-issue-roadmap", "naming": "percent_encode_source_locator", "prefix": "outcome-candidate--", "suffix": ".roadmap-outcomes.json" },
+      "envelopeWriter": "npm run roadmap:candidate -- --in=<privacy-filtered-draft-json> --out=artifacts/github-issue-roadmap/outcome-candidate--<percent-encoded-source-locator>.roadmap-outcomes.json",
+      "failureBehavior": "inactive_until_surface_exists",
+      "budgets": {
+        "maxCandidatesPerEnvelope": 5,
+        "maxEnvelopeBytes": 65536,
+        "maxCandidateBytes": 16384,
+        "maxActionPayloadBytes": 16384
+      },
+      "privacyProfile": "future_user_bug_minimal",
+      "conformanceFixture": "scripts/__tests__/github-issue-roadmap-outcome-candidate.test.ts"
+    }
+  ]
+}

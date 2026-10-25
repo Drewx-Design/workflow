@@ -1,2 +1,15 @@
 __pycache__/
 *.pyc
+node_modules/
+coverage/
+.env
+.env.*
+*.dpapi
+credential*.dat
+**/artifacts/
+**/reports/
+**/journal.jsonl
+**/execution.journal.jsonl
+**/installation.json
+**/task.xml
+*.log

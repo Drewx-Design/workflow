@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "github-issue-roadmap-outcome-envelope/v1",
+  "repository": {
+    "organization": "example-org",
+    "name": "example-repo",
+    "databaseId": 123,
+    "nodeId": "R_repo"
+  },
+  "producer": { "kind": "ideation", "version": "1" },
+  "artifact": {
+    "stableId": "ideation:no-closeable-outcome",
+    "revisionSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "sourceLocator": "docs/ideation/no-closeable-outcome.md"
+  },
+  "candidates": []
+}

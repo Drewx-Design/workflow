@@ -1,0 +1,95 @@
+{
+  "schemaVersion": "github-issue-roadmap-outcome-envelope/v1",
+  "repository": {
+    "organization": "example-org",
+    "name": "example-repo",
+    "databaseId": 123,
+    "nodeId": "R_repo"
+  },
+  "producer": { "kind": "audit", "version": "1" },
+  "artifact": {
+    "stableId": "audit:roadmap-drift",
+    "revisionSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sourceLocator": "docs/audits/roadmap-drift.md"
+  },
+  "candidates": [
+    {
+      "stableOutcomeId": "repair-marker-drift",
+      "outcome": {
+        "title": "Repair source marker drift",
+        "completionRule": "Canonical issues contain one valid source marker per consumed emission.",
+        "affectedSystems": ["roadmap-intake"]
+      },
+      "evidence": [
+        {
+          "id": "audit-marker-finding",
+          "kind": "source_artifact",
+          "sourceLocator": "docs/audits/roadmap-drift.md",
+          "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "provenance": [
+        {
+          "id": "audit-origin",
+          "sourceLocator": "docs/audits/roadmap-drift.md",
+          "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "readiness": {
+        "independentlyCloseable": true,
+        "framingComplete": true,
+        "completionRuleDefined": true,
+        "evidenceSufficient": true,
+        "estimationSubstrate": true,
+        "unresolvedDecisionIds": [],
+        "dependencyIds": [],
+        "currentMainVerificationEvidenceId": null
+      },
+      "relationshipCandidates": [],
+      "suggestions": {
+        "type": { "value": "Task", "confidence": "high", "rationale": "A bounded repair." },
+        "priority": { "value": "P3", "confidence": "high", "rationale": "No active duplicate risk was observed." },
+        "effort": { "value": "Low", "confidence": "high", "rationale": "The affected surface is bounded." }
+      }
+    },
+    {
+      "stableOutcomeId": "document-marker-recovery",
+      "outcome": {
+        "title": "Document marker recovery",
+        "completionRule": "The runbook explains exact recovery for corrupt markers.",
+        "affectedSystems": ["roadmap-runbook"]
+      },
+      "evidence": [
+        {
+          "id": "audit-runbook-finding",
+          "kind": "source_artifact",
+          "sourceLocator": "docs/audits/roadmap-drift.md",
+          "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "provenance": [
+        {
+          "id": "audit-origin",
+          "sourceLocator": "docs/audits/roadmap-drift.md",
+          "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "readiness": {
+        "independentlyCloseable": true,
+        "framingComplete": true,
+        "completionRuleDefined": true,
+        "evidenceSufficient": true,
+        "estimationSubstrate": true,
+        "unresolvedDecisionIds": [],
+        "dependencyIds": [],
+        "currentMainVerificationEvidenceId": null
+      },
+      "relationshipCandidates": [],
+      "suggestions": {
+        "type": { "value": "Task", "confidence": "high", "rationale": "A documentation outcome." },
+        "priority": { "value": "P3", "confidence": "high", "rationale": "The recovery path is operational hardening." },
+        "effort": { "value": "Low", "confidence": "high", "rationale": "The runbook surface is known." }
+      }
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "github-issue-roadmap-dispatcher-capabilities/v1",
+  "repository": "example-org/example-repo",
+  "capabilities": [
+    {
+      "capability": "create_issue", "entrypoint": "automatic", "actionKinds": ["create_issue"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues", "maxActions": 2,
+      "credentialClass": "roadmap-intake-create-writer", "proofSha256": null
+    },
+    {
+      "capability": "append_evidence", "entrypoint": "automatic", "actionKinds": ["append_evidence"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/comments", "maxActions": 5,
+      "credentialClass": "roadmap-intake-comment-writer", "proofSha256": null
+    },
+    {
+      "capability": "append_evidence_overlap", "entrypoint": "automatic", "actionKinds": ["append_evidence_overlap"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/comments", "maxActions": 5,
+      "credentialClass": "roadmap-intake-comment-writer", "proofSha256": null
+    },
+    {
+      "capability": "close_issue_existence", "entrypoint": "automatic", "actionKinds": ["close_issue_existence"],
+      "enabled": false, "qualification": "unqualified", "method": "PATCH",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}", "maxActions": 1,
+      "credentialClass": "roadmap-intake-lifecycle-writer", "proofSha256": null
+    },
+    {
+      "capability": "set_type", "entrypoint": "automatic", "actionKinds": ["set_type"],
+      "enabled": false, "qualification": "unqualified", "method": "PATCH",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}", "maxActions": 1,
+      "credentialClass": "roadmap-intake-type-writer", "proofSha256": null
+    },
+    {
+      "capability": "set_priority", "entrypoint": "automatic", "actionKinds": ["set_priority"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/issue-field-values", "maxActions": 1,
+      "credentialClass": "roadmap-intake-priority-writer", "proofSha256": null
+    },
+    {
+      "capability": "set_effort", "entrypoint": "automatic", "actionKinds": ["set_effort"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/issue-field-values", "maxActions": 1,
+      "credentialClass": "roadmap-intake-effort-writer", "proofSha256": null
+    },
+    {
+      "capability": "sensitive_evidence", "entrypoint": "approval", "actionKinds": ["append_sensitive_evidence"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/comments", "maxActions": 1,
+      "credentialClass": "roadmap-sensitive-comment-writer", "proofSha256": null
+    },
+    {
+      "capability": "sensitive_field", "entrypoint": "approval", "actionKinds": ["set_p0_p1", "set_now_parked"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/issue-field-values", "maxActions": 2,
+      "credentialClass": "roadmap-sensitive-field-writer", "proofSha256": null
+    },
+    {
+      "capability": "sensitive_lifecycle", "entrypoint": "approval", "actionKinds": ["close_issue", "reopen_issue", "retire_duplicate", "retire_superseded"],
+      "enabled": false, "qualification": "unqualified", "method": "PATCH",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}", "maxActions": 1,
+      "credentialClass": "roadmap-sensitive-lifecycle-writer", "proofSha256": null
+    },
+    {
+      "capability": "remove_relationship", "entrypoint": "approval", "actionKinds": ["remove_relationship"],
+      "enabled": false, "qualification": "unqualified", "method": "DELETE",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/relationships/{relationship_id}", "maxActions": 1,
+      "credentialClass": "roadmap-sensitive-relationship-writer", "proofSha256": null
+    },
+    {
+      "capability": "change_relationship", "entrypoint": "approval", "actionKinds": ["change_relationship"],
+      "enabled": false, "qualification": "unqualified", "method": "POST",
+      "endpointPattern": "/repos/example-org/example-repo/issues/{issue_number}/relationships", "maxActions": 1,
+      "credentialClass": "roadmap-sensitive-relationship-writer", "proofSha256": null
+    }
+  ]
+}

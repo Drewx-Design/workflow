@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "github-issue-roadmap-assessment-stack/v1",
+  "promptLocator": "scripts/github-issue-roadmap-assessment-prompt.md",
+  "provider": "openai",
+  "model": "gpt-5.6",
+  "promptSha256": "2f151d19d2a1bdbd4b9b1b53de4ac918bec98c58f2abfd06ba6c5ffb5a964638",
+  "rubricSha256": "2310f21751cba6b6445b7878140cb3bdb5bb0afb774819fec0913572199a893f",
+  "toolchainSha256": "49e3a717f48df02718f370f286b8d8f8bd77229a7118bc92cf27ebcc39ebc3f3",
+  "calibrationRelease": "workflow-export-unqualified"
+}

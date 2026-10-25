@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "github-issue-roadmap-outcome-envelope/v1",
+  "repository": {
+    "organization": "example-org",
+    "name": "example-repo",
+    "databaseId": 123,
+    "nodeId": "R_repo"
+  },
+  "producer": { "kind": "future_user_bug", "version": "1" },
+  "artifact": {
+    "stableId": "future-bug:BUG-001",
+    "revisionSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "sourceLocator": "artifacts/github-issue-roadmap/user-bugs/BUG-001.json"
+  },
+  "candidates": [
+    {
+      "stableOutcomeId": "restore-safe-export",
+      "outcome": {
+        "title": "Restore safe export behavior",
+        "completionRule": "The repository regression test proves the sanitized export succeeds.",
+        "affectedSystems": ["document-export"]
+      },
+      "evidence": [
+        {
+          "id": "sanitized-bug-signal",
+          "kind": "repository_fact",
+          "sourceLocator": "artifacts/github-issue-roadmap/user-bugs/BUG-001.json",
+          "contentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "provenance": [
+        {
+          "id": "sanitized-bug-origin",
+          "sourceLocator": "artifacts/github-issue-roadmap/user-bugs/BUG-001.json",
+          "contentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "readiness": {
+        "independentlyCloseable": true,
+        "framingComplete": true,
+        "completionRuleDefined": true,
+        "evidenceSufficient": true,
+        "estimationSubstrate": false,
+        "unresolvedDecisionIds": [],
+        "dependencyIds": [],
+        "currentMainVerificationEvidenceId": null
+      },
+      "relationshipCandidates": [],
+      "suggestions": {
+        "type": { "value": "Bug", "confidence": "high", "rationale": "A reproducible product failure." },
+        "priority": { "value": null, "confidence": "low", "rationale": "Impact evidence is intentionally absent." },
+        "effort": { "value": null, "confidence": "low", "rationale": "No estimation substrate is present." }
+      }
+    }
+  ]
+}
