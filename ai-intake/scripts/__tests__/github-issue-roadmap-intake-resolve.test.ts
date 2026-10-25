@@ -626,4 +626,3 @@ const CREATE_IDENTITY = { repository: CENSUS_REPOSITORY, sourceFingerprint: OWNE
 // Private captured-fixture replay is excluded from this public source copy.
 
 // Private captured-fixture replay is excluded from this public source copy.
-
