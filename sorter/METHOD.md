@@ -96,4 +96,4 @@ Source: [executor](scripts/lib/github-issue-roadmap/stewardship-executor.ts), [p
 
 ## What I would measure next
 
-The [operating record](../results/2026-10-18-to-24.md) establishes activity and recorded write outcomes. To judge the ranking itself, I would compare it with a simple milestone-tier/effort ordering on the same frozen backlog, record my decisions before seeing which method produced each list, and track corrections and completed milestone steps. Until that comparison exists, I treat the formula as an explicit preference I can inspect and revise.
+The new sorter is awaiting its first operational run; [validated operating results are still to come](../results/README.md). To judge the ranking itself, I would compare it with a simple milestone-tier/effort ordering on the same frozen backlog, record my decisions before seeing which method produced each list, and track corrections and completed milestone steps. Until that comparison exists, I treat the formula as an explicit preference I can inspect and revise.

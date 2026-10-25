@@ -1,6 +1,6 @@
 # Sorter
 
-I use this to order a GitHub backlog against the next product milestone. A severity label alone cannot tell me whether to fix a blocker, build a valuable feature, or spend time on the tools that make the rest possible.
+I built this to order a GitHub backlog against the next product milestone. A severity label alone cannot tell me whether to fix a blocker, build a valuable feature, or spend time on the tools that make the rest possible.
 
 The sorter separates those questions. Two model families assess the evidence; deterministic code merges their assessments, compiles the working set, and prepares field changes. The code decides timing rather than asking a model to choose “Now”.
 
@@ -41,7 +41,7 @@ I define the milestone and its anchors, decide unresolved product choices, and r
 
 ## Evidence and limits
 
-The [operating record](../results/2026-10-18-to-24.md) includes 165 distinct assessed issues and 298 confirmed action outcomes out of 299 attempted actions during one week. Most runs were partial; the record includes that denominator and the unresolved action. These counts establish use, not ranking quality.
+The new sorter was completed the week of October 25, 2026 and is awaiting its first operational run. Debugging and validation are ongoing. The linked source and constructed tests make the method inspectable; there are no validated operating results for this version yet. [Development status](../results/README.md).
 
 The formula encodes a preference, not a validated estimate of business return. Squaring a noisy value estimate can amplify its error. There is not yet a published comparison against a simpler ranking method.
 

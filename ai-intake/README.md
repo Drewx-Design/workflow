@@ -31,7 +31,7 @@ I resolve ambiguous matches and product choices and review operations that requi
 
 ## Evidence and limits
 
-The [operating record](../results/2026-10-18-to-24.md) contains 64 matching intent/completion pairs for issue creation during one week, covering 64 distinct issues. This shows recorded execution, not that every issue was useful or that every candidate reached this journal. The source kit's included tests use constructed evidence; private captures and calibration records are omitted.
+This tool is still being tested and refined. The source kit's included tests use constructed evidence; private captures and calibration records are omitted. Validated operating results for the current version are not yet published. [Development status](../results/README.md).
 
 The system is deliberately coupled to a candidate schema, repository evidence conventions, and a review process. That setup cost only makes sense if the volume of findings justifies it.
 

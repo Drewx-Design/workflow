@@ -27,7 +27,7 @@ The coordinator does not perform the worker's task, answer product questions for
 
 ## Evidence and limits
 
-The [operating record](../results/2026-10-18-to-24.md) shows 22 distinct workers entering the start flow in one repository during a week. It also records four distinct workers with start failures, 25 actions reaching uncertain delivery, and 23 of those actions later confirmed delivered by the cutoff. These are operating observations, not a count of shipped features.
+This tool is still being tested and refined. Its producer captures document real integration behavior, but they are not a performance benchmark. Validated operating results for the current version are not yet published. [Development status](../results/README.md).
 
 The [fixture notes](tests/fixtures/README.md) document actual producer behavior that changed the implementation, including question forms appearing differently across Claude Code versions. The tests combine sanitized captures with constructed scenarios. This integration needs maintenance as the producer formats change.
 

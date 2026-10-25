@@ -28,7 +28,7 @@ I decide whether to commission scratch publication, install the schedule, releas
 
 ## Evidence and limits
 
-In the [recorded week](../results/2026-10-18-to-24.md), nine live runs observed 248 distinct worktree paths. Two completed with holds, five ended at a deadline, and two had a failed outcome. Those results make throughput and diagnosable holds the next improvement target. They are not a claim of unattended reliability.
+This tool is still being tested and refined. The policy examples show the intended decisions and link to the checks behind them. Validated operating results for the current version are not yet published. [Development status](../results/README.md).
 
 The sanitized export was checked with focused policy, admission, path, encoding, and credential-fixture tests; its complete Windows integration suite was not completed during export verification. Windows activity readers and junction behavior are specific to my setup.
 
