@@ -2,10 +2,12 @@
   "sourceCommit": "2daf2daa1c3257240f82b6846a11c008a03c5ddf",
   "files": {
     ".npmrc": "a093bb2fed59d699b7f9a62a5203cc196054c624e9c39c6d908c9e7db5dd2464",
+    "ADAPTING.md": "bac659b8139c89ae998e270579d53ce0ca057f4ec828a73e03cbee043eaef417",
+    "METHOD.md": "4b8e28783399780b5ce833f812711c2f88e1f8242fc957915745764a80ab3b8f",
+    "README.md": "422f662d0024fa59c6f5a437981575fab9483dddbf707817befa3be0101e2ee8",
     "examples/milestone-1.md": "ff820a53c6af9f32484e5c89573ec42ace2f307ad2f73471ae4976ba3842985b",
     "package-lock.json": "16fcaa0392eefec7548c4a0054caaa2db11e57489873df40207ec603956b1adb",
     "package.json": "c761ac4cb44d276c8ea69da25c71dfe195dcfdc9fe740dbf1318c3e4238532b8",
-    "README.md": "f8cd1ba9f00eefbea07d877cf71a722565fe4c0dc283e290b5c4260b82875f1b",
     "scripts/__tests__/fixtures/roadmap-stewardship.ts": "c784fec1bd8e3818a011e443c82fbe051564399771df5f056c5be532d7ebde73",
     "scripts/__tests__/roadmap-stewardship-assessment.test.ts": "c7ab86418518415a08c6b58c00d9dcc058b29d19ca3b787280b207c79ebd0cc4",
     "scripts/__tests__/roadmap-stewardship-astra-seat.test.ts": "b4ed225bb403d699ad7cc372fc14922c60751b09a2317c191dd8a96b6497635b",

@@ -1,66 +1,37 @@
 # Worktree cleanup
 
-Built for my own workflow on Windows 11. I'm sharing this as a reference for the ideas and decisions behind it. It isn't designed to be copied directly into another setup; the notes below explain the assumptions you'll need to revisit if you adapt the code.
+Parallel agent work leaves branches, linked worktrees, and unfinished files behind. I use this tool to inspect that work before deciding what can be removed. A quiet directory alone does not establish that its work is finished or recoverable.
 
-Parallel agent work leaves behind branches, linked worktrees, and unfinished files. I use this tool to inspect that work before deciding what can be removed.
+The tool checks repository identity, Git state, process and session activity, leases, links, and recovery evidence. Eligible dirty work can take a rescue or archive path. Unknown state is held for inspection. Removal rechecks its evidence immediately before acting.
 
-It checks repository identity, Git state, process and session activity, worktree leases, links, and recovery evidence. Dirty work can be preserved through a rescue PR or a verified scratch snapshot. Unknown state is held for inspection. Removal rechecks its evidence immediately before acting.
+## Worked example
 
-## Requirements and tests
+Constructed illustration based on the policy tests, not a report of a live removal.
 
-The runtime uses Node.js built-ins, Git, GitHub CLI, and Windows PowerShell. Windows 11 is the supported environment; process inspection, junction handling, notifications, and Task Scheduler are Windows-specific. Use Node.js matching `^20.20.0 || >=22.22.0`.
+| Observation | Decision | Outcome |
+| --- | --- | --- |
+| A linked worktree has an untracked source file; the required idle evidence is unknown. | Hold it with the `leftovers` reason. | The worktree stays in place. |
+| A different tree contains staged changes, satisfies the other checks, and has affirmative idle evidence. | Choose the archive path. | Preservation must complete and pass the removal checks before deletion can proceed. |
+| That otherwise archivable tree has a dangling junction or a self-link. | Hold it. | Idle evidence does not override an unsafe link. |
 
-```powershell
-cd worktree-cleanup
-npm ci
-npm test
-```
+See the cases around `snapshotFallback`, staged changes, and link holds in the [policy tests](scripts/__tests__/worktree-cleanup-policy.test.ts). The [removal implementation](scripts/lib/worktree-cleanup/remove.mjs) and [removal tests](scripts/__tests__/worktree-cleanup-remove.test.ts) cover the later boundary; a plan to archive is not proof that archiving or removal succeeded.
 
-The dependency installation is for the tests; the cleanup runtime needs no npm packages. Tests use disposable repositories and synthetic session records. `.npmrc` selects the peer resolver used to install the pinned test dependencies.
+## Why it is built this way
 
-## If you adapt the code
+- **Unknown is a reason to stop.** Missing process, session, identity, or Git evidence cannot establish that a tree is safe to remove. See [activity collection](scripts/lib/worktree-cleanup/activity.mjs) and [policy](scripts/lib/worktree-cleanup/policy.mjs).
+- **Preserve recoverable work before removing its checkout.** Rescue, archives, and scratch snapshots serve different kinds of leftovers. Admission checks also look for material that should not be published. See [admission](scripts/lib/worktree-cleanup/admission.mjs), [archives](scripts/lib/worktree-cleanup/archive.mjs), and [snapshots](scripts/lib/worktree-cleanup/snapshot.mjs).
+- **Check again at the destructive boundary.** A tree can change after inventory. Removal has its own checks rather than treating an earlier plan as sufficient. See [removal](scripts/lib/worktree-cleanup/remove.mjs) and [safe-path tests](scripts/__tests__/worktree-cleanup-safe-path.test.ts).
 
-Copy `scripts/` into the primary checkout you want to manage, preserving paths. Replace `example-org/example-repo` in the runtime with its exact GitHub identity. Review the archive and report locations, rescue and scratch classifications, and activity readers before adoption. The primary checkout must have an HTTPS `origin` and an `origin/main` branch.
+## What I keep manual
 
-Commit the adapted scripts on `main`. The scheduled launcher uses a separate runner pinned to that revision. It refuses an unregistered, redirected, or dirty runner. It also requires the original workflow's activity evidence (including supported agent session records and leases); missing evidence can hold a tree rather than make it removable.
+I decide whether to commission scratch publication, install the schedule, release work explicitly, or investigate a hold. A live run can publish rescue commits and PRs and remove eligible trees; it is different from a diagnostic dry run. Recovery uses the command and evidence recorded with the archive.
 
-## Preview first
+## Evidence and limits
 
-From the target repository:
+In the [recorded week](../results/2026-10-18-to-24.md), nine live runs observed 248 distinct worktree paths. Two completed with holds, five ended at a deadline, and two had a failed outcome. Those results make throughput and diagnosable holds the next improvement target. They are not a claim of unattended reliability.
 
-```powershell
-node scripts/worktree-cleanup.mjs inventory --repo C:/Projects/my-repo
-node scripts/worktree-cleanup.mjs run --dry-run --repo C:/Projects/my-repo --report-root C:/Temp/cleanup-preview
-```
+The sanitized export was checked with focused policy, admission, path, encoding, and credential-fixture tests; its complete Windows integration suite was not completed during export verification. Windows activity readers and junction behavior are specific to my setup.
 
-A dry run writes a diagnostic report. It does not fetch, push, create PRs, remove worktrees, persist idle observations, write archives, or prune. Keep the report root outside any worktree eligible for removal.
+## Explore or adapt
 
-For a reviewed live run, pass `--manual` instead of `--dry-run`. Live execution can publish rescue commits and PRs and remove eligible worktrees. Existing authentication is used; no credentials are bundled here.
-
-## Optional scheduling
-
-```powershell
-# Print the proposed task without installing it.
-.\scripts\install-worktree-cleanup.ps1 -Repository C:\Projects\my-repo -PrintXml
-
-# Copy the launcher without registering a task.
-.\scripts\install-worktree-cleanup.ps1 -Repository C:\Projects\my-repo -InstallOnly
-```
-
-Running the installer without either preview switch registers an **enabled** daily 03:00 task. The owner must be logged in; a locked session works. The default report and install root is `%LOCALAPPDATA%\WorkflowTools\worktree-cleanup`. The supplied installer uses one fixed task name. To schedule multiple repositories, adapt that name and use a distinct `-InstallRoot` for each; changing the install root alone is insufficient.
-
-The launcher is hash-pinned to its installation record. Update it by reinstalling reviewed code. Do not edit its installed hash or journal to clear a hold.
-
-## Recovery
-
-Reports name each worktree's proposed action, result, hold reason, and recovery information. Preserve the journals with the archives. A verified snapshot includes its recovery command; use that exact command and a new destination. `restore` restores a local archive, while `recover` retrieves a published scratch snapshot. Scratch snapshots require the separate `commission --preview` / `commission --confirm` flow before use.
-
-The archive policy retains verified archives for up to 180 days or 10 GB, pruning oldest first. Current-run archives are protected. Review these defaults for your own work.
-
-## Layout
-
-- `scripts/worktree-cleanup.mjs`: CLI and orchestration.
-- `scripts/lib/worktree-cleanup/`: inventory, activity, policy, archives, rescue, snapshots, and removal.
-- `scripts/install-worktree-cleanup.ps1`: optional scheduled-task installation.
-- `scripts/release-worktree.ps1`: explicit owner release.
-- `scripts/__tests__/`: disposable-repository regression tests.
+Built for my Windows 11 workflow. Borrow the preservation and refusal rules; adapt the activity sources and recovery policy before using the code. [Tests, setup, dry runs, scheduling, and recovery commands](ADAPTING.md) are in the adaptation guide. Read the scheduler section before installation: the installer's non-preview path registers an enabled task.

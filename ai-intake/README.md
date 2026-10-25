@@ -1,63 +1,40 @@
 # AI intake
 
-Built for my own workflow on Windows 11. I'm sharing this as a reference for the ideas and decisions behind it. It isn't designed to be copied directly into another setup; the notes below explain the assumptions you'll need to revisit if you adapt the code.
+I use this to turn findings from plans, audits, and agent work into GitHub issues. A useful finding needs a traceable source, a clear outcome, and a check against existing work before it becomes another item in the backlog.
 
-I use this to turn findings from plans, audits, and agent work into GitHub issues. A producer writes a structured candidate file with the outcome, evidence, and source identity. Intake compares it with existing work, checks whether the outcome is already implemented, and prepares a new issue, supporting comment, or hold.
+A producer writes a structured candidate file with the outcome, evidence, and source identity. Intake checks that evidence, compares the candidate with existing work, and prepares a new issue, supporting evidence for an existing issue, or a hold. Models assess the material; validated execution plans and the transport determine what may be written.
 
-The filing path records its intent before writing and verifies the result afterward. If GitHub's response is ambiguous, it reconciles the recorded attempt instead of blindly creating another issue. Models assess evidence; validated execution plans and the transport determine what can actually be written.
+## Worked example
 
-## Try the tests
+Constructed illustration of an included regression test, not a live issue record.
 
-Use Windows 11 and Node.js matching `^20.20.0 || >=22.22.0`.
+| Stage | What happens |
+| --- | --- |
+| Finding | A candidate requests a fix for an export failure and carries its source marker. |
+| Existing work | The same marker appears on two existing issues. |
+| Decision | Intake returns a hold because it cannot choose one authoritative match. |
+| Result | No GitHub mutation occurs, and the execution claim is released. The operator must resolve the ambiguous match. |
 
-```powershell
-cd ai-intake
-npm ci
-npm test
-npm run typecheck
-```
+The benefit is avoiding another issue while the identity of the existing work is unclear. The test named `surfaces a deterministic duplicate-marker hold and releases its claim` checks this in [the filing tests](scripts/__tests__/github-issue-roadmap-file-finding.test.ts).
 
-Dependencies are pinned. `.npmrc` works around npm 11.4.2's peer-resolution crash. Private census captures, historical execution rows, calibration data, and tests requiring those records are excluded. Included tests construct their own evidence and disposable repositories.
+A separate crash-recovery test records intent, simulates a stopped process, and checks the next run. If it finds the created issue, it reconciles the attempt without creating another one. If it cannot resolve the outcome, it records `create_unresolved`. Search the same test file for `reconciles a crash after create intent`.
 
-## If you adapt the code
+## Why it is built this way
 
-The runtime expects `scripts/` at the target repository's root and reads committed source evidence from `origin/main`.
+- **Bind findings to evidence.** A candidate names its source and revision so a recommendation can be checked against the repository it describes. A plausible duplicate or insufficient evidence can produce a hold. See [filing orchestration](scripts/github-issue-roadmap-file-finding.ts).
+- **Record intent before the external write.** A lost response does not tell us whether GitHub created the issue. The durable journal gives a later run something to reconcile. See the [execution journal](scripts/lib/github-issue-roadmap/intake-execution-journal.ts) and its [tests](scripts/__tests__/github-issue-roadmap-intake-execution-journal.test.ts).
+- **Separate recommendation from permission.** Approval and execution checks determine whether a write is allowed. Concurrent workers share claims so they cannot independently consume the same authority. See the [GitHub transport](scripts/lib/github-issue-roadmap/github-intake-approval-transport.ts).
 
-1. Copy the runtime files under `scripts/`, preserving paths. Merge the dependencies and the `roadmap:*` commands from this folder's `package.json` into your repository's manifest.
-2. Replace the `example-org`, `example-repo`, and `example-user` runtime placeholders. Keep the test fixtures on their example identities. Review `github-issue-roadmap-producers.json`: it defines which artifact types can produce candidates, their locations, and their size limits.
-3. Review the assessment prompt, schema, and stack descriptors. The exported descriptors are marked `workflow-export-unqualified`; the original project's calibration is not an approval for your project. If you edit the prompt, update its SHA-256 in both stack descriptors. Do not enable capabilities or remove evidence checks to make a held candidate pass.
-4. Install Git, GitHub CLI, Codex, and any model CLI required by the assessment adapters. Set up your own authentication. The filing wrapper accepts `-CredentialPath` for an operator-owned DPAPI-protected GitHub credential; credentials and runtime state belong outside source control.
-5. Supply your own `STRATEGY.md` and `docs/runbooks/github-issue-roadmap.md`, and commit both on the target repository's `main`. Census capture requires both as source evidence. Private project documents are not included here. Commit the runtime and candidate source artifacts as well. GitHub issue types and fields must match the transport's schema; the transport uses native issue fields, not Project columns.
+## What I keep manual
 
-The sample automatic capability manifest is disabled. Explicit operator filing is a separate path; the presence of a manifest or a successful dry run does not grant write authority.
+I resolve ambiguous matches and product choices and review operations that require explicit approval. The exported automatic capability manifest is disabled. A successful assessment or dry run does not grant write authority.
 
-The stack descriptors retain the original opaque rubric and toolchain compatibility identifiers. They are not a verified build attestation for this export. The prompt hash is rebound to the included prompt, and `workflow-export-unqualified` gives this copy a distinct stack identity. Establish your own reviewed provenance and qualification before treating the descriptors as evidence of a calibrated deployment.
+## Evidence and limits
 
-## Candidate to issue
+The [operating record](../results/2026-10-18-to-24.md) contains 64 matching intent/completion pairs for issue creation during one week, covering 64 distinct issues. This shows recorded execution, not that every issue was useful or that every candidate reached this journal. The source kit's included tests use constructed evidence; private captures and calibration records are omitted.
 
-Start with the constructed candidate examples under `scripts/__tests__/fixtures/github-issue-roadmap/outcome-candidates/`. They illustrate the schema; replace the source identities, evidence hashes, and outcomes with actual repository evidence before filing.
+The system is deliberately coupled to a candidate schema, repository evidence conventions, and a review process. That setup cost only makes sense if the volume of findings justifies it.
 
-```powershell
-# Validate and canonicalize a draft candidate file.
-npm run roadmap:candidate -- --in=<draft.json> --out=<candidate.roadmap-outcomes.json>
+## Explore or adapt
 
-# Inspect the filing path without authorizing writes.
-.\scripts\run-github-issue-roadmap-file-finding.ps1 -Candidate <committed-sidecar-path> -Repository owner/repo
-
-# Explicitly authorize the prepared filing operation after reviewing its result.
-.\scripts\run-github-issue-roadmap-file-finding.ps1 -Candidate <committed-sidecar-path> -Repository owner/repo -Execute
-```
-
-The sidecar lives under `artifacts/github-issue-roadmap/`, with the source locator percent-encoded in its filename. Read `github-issue-roadmap-producers.json` for the naming rule. Candidates are bounded to five per envelope, with source and revision bindings. A plausible duplicate or insufficient evidence can produce a hold; the result names the next step.
-
-The lower-level `intake-*` commands expose assessment, approval, application, holds, resolution, and draining. They share an execution journal and claims so concurrent workers cannot independently consume the same authority. Start with the filing wrapper rather than assembling those stages by hand.
-
-## Layout
-
-- `scripts/github-issue-roadmap-file-finding.ts`: filing orchestration.
-- `scripts/lib/github-issue-roadmap/intake-*`: decisions, approval, evidence, execution journal, and recovery.
-- `scripts/lib/github-issue-roadmap/github-intake-approval-transport.ts`: GitHub writes and verification.
-- `scripts/github-issue-roadmap-assessment-*`: model prompt and schema.
-- `scripts/__tests__/`: constructed fixtures and regression tests.
-
-Intake and sorter share roadmap modules. If adopting both, merge one reviewed set into the target repository. Never overwrite an existing operational journal with an example or test record.
+Built for my Windows 11 workflow. Borrow the evidence and recovery patterns; adapt the repository assumptions before using the code. [Tests, setup, credentials, candidate commands, and execution instructions](ADAPTING.md) are in the adaptation guide.

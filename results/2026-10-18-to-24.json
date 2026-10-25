@@ -1,0 +1,69 @@
+{
+  "window": {
+    "startInclusiveUTC": "2026-10-18T00:00:00+00:00",
+    "endExclusiveUTC": "2026-10-25T00:00:00+00:00"
+  },
+  "scope": "Retained journals from one personal repository; deployed originals, not a trial of the sanitized source kits.",
+  "sorter": {
+    "runsStarted": 32,
+    "runModes": {
+      "run": 32
+    },
+    "runStatusesByCutoff": {
+      "partial": 30,
+      "updated": 1,
+      "no_finish_by_cutoff": 1
+    },
+    "assessmentRecords": 166,
+    "distinctIssuesAssessed": 165,
+    "actionAttempts": 299,
+    "actionOutcomesByCutoff": {
+      "confirmed": 298,
+      "unresolved": 1
+    },
+    "rejectedAssessmentRecords": 17
+  },
+  "intake": {
+    "intentRecords": 64,
+    "intentActions": {
+      "create_issue": 64
+    },
+    "completeRecords": 64,
+    "completeActions": {
+      "create_issue": 64
+    },
+    "distinctIssuesWithCompleteRecords": 64,
+    "nonEventDecisionRecords": 0
+  },
+  "cleanup": {
+    "runsStarted": 9,
+    "dryRuns": 0,
+    "liveRunStatuses": {
+      "completed": 2,
+      "failed": 7
+    },
+    "liveRunOutcomes": {
+      "completed-with-holds": 2,
+      "deadline": 5,
+      "failed": 2
+    },
+    "worktreeObservations": 1276,
+    "distinctWorktreePathsObserved": 248,
+    "mutationKinds": {
+      "remove-started": 36,
+      "deregister": 36,
+      "restore": 5,
+      "unlink-junction": 14,
+      "unlink-snapshot": 300,
+      "rmdir-snapshot": 90
+    }
+  },
+  "coordinator": {
+    "distinctWorkersStarted": 22,
+    "distinctWorkersWithStartFailure": 4,
+    "distinctActionsReportedDeliveryUnknown": 25,
+    "thoseActionsLaterRecordedDeliveredByCutoff": 23,
+    "distinctDeliveredActionsInWindow": 48,
+    "watcherLostEvents": 2
+  }
+}

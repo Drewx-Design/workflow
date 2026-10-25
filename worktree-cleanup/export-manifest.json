@@ -2,9 +2,10 @@
   "sourceCommit": "2daf2daa1c3257240f82b6846a11c008a03c5ddf",
   "files": {
     ".npmrc": "a093bb2fed59d699b7f9a62a5203cc196054c624e9c39c6d908c9e7db5dd2464",
+    "ADAPTING.md": "1fea17c26dc2c892f7d785c193b29661615cdfe77e6cd9820c7fe5eeffd0a439",
+    "README.md": "8188f9f407fe4ce01bca37469408f7613d91af19219b1c678bfc1467a67e5f7f",
     "package-lock.json": "f758e6e1b852302438b46d2b8ce47910679324bbffb65379701455dc9d72f7ba",
     "package.json": "0bbfaa7c8d9c2c80f3ca6a03b939faabd7b1c9ccf4825952ab345b75ba3a4dab",
-    "README.md": "bf31350fbd47c2e8cf391a7158d8e2a120f0f2e27123c64f2500690decae16f5",
     "scripts/__tests__/worktree-cleanup-activity.test.ts": "af04afa6931bba68c07b12210f017a8e4d7e4fb21f7150bec74a53aeafe62679",
     "scripts/__tests__/worktree-cleanup-admission.test.ts": "ff77a3307862e7b83dbb5c28c0122741d8d4f11825c3a6300cd0a5ad3c665661",
     "scripts/__tests__/worktree-cleanup-archive.test.ts": "afb99cb01df9b0210a0f4805fde3d6c3cffe31c95406ed06295df999af8a188c",

@@ -1,60 +1,50 @@
 # Sorter
 
-Built for my own workflow on Windows 11. I'm sharing this as a reference for the ideas and decisions behind it. It isn't designed to be copied directly into another setup; the notes below explain the assumptions you'll need to revisit if you adapt the code.
+I use this to order a GitHub backlog against the next product milestone. A severity label alone cannot tell me whether to fix a blocker, build a valuable feature, or spend time on the tools that make the rest possible.
 
-I use this to keep an issue backlog ordered against the next product milestone. It reads open GitHub issues and repository evidence, asks separate models to assess them, and compiles their answers into a proposed backlog. It records uncertainty and disagreement rather than inventing a ranking.
+The sorter separates those questions. Two model families assess the evidence; deterministic code merges their assessments, compiles the working set, and prepares field changes. The code decides timing rather than asking a model to choose “Now”.
 
-The sorter can write the native Priority, Horizon, Effort, Lifecycle, and Sort key fields under its versioned policy. It retains evidence, assessments, approvals, attempts, and readbacks so an interrupted run can be reconciled. Changes made by the operator are treated as holds.
+## The ranking method
 
-## Try the tests
+For ordinary eligible product improvements:
 
-Requirements: Windows 11, Node.js matching `^20.20.0 || >=22.22.0`, and npm. Use Node 22.22+ if installing a newer Node release. The package lock pins the dependencies used by this copy; `.npmrc` selects the legacy peer resolver because npm 11.4.2's default resolver crashes on this dependency graph.
+**Score = Value² × Ease / 10**
 
-```powershell
-cd sorter
-npm ci
-npm test
-npm run typecheck
-```
+Value is 1–10 against the milestone. Ease is **4 for low effort, 3 for medium, and 2 for high**. A value-8, high-effort improvement scores **12.8**; a value-5, low-effort improvement scores **10**. This gives meaningful improvements room to outrank easy polish.
 
-Tests use constructed evidence and mock transports. Private captured assessments and historical journals are not distributed. The examples use fresh state and do not migrate an existing sorter.
+The score is one input. Milestone blockers, verified emergencies, existing work, explicit pins, and a tooling allocation have their own rules. Severity stays separate from value, and scope stays separate from whether work is already done.
 
-## If you adapt the code
+Read [How I sort issues](METHOD.md) for the full decision sequence, model merge rules, capacity limits, and tradeoffs.
 
-The current implementation expects the `scripts/` directory at the root of the repository being managed, local `node_modules`, an HTTPS GitHub origin, and an `origin/main` branch.
+## Worked example
 
-1. Copy the runtime files under `scripts/` into your repository, preserving their paths. Add the dependencies and commands from this folder's `package.json` to your own manifest. Do not replace an existing manifest wholesale.
-2. Replace `example-org`, `example-repo`, and `example-user` in the runtime files with your GitHub organization, repository, and operator login. Search the scripts for all three placeholders; the origin checks, policy identity, and evidence collector must agree. Keep tests on their example identities.
-3. Adapt [the milestone example](examples/milestone-1.md) and commit it as `docs/roadmap/milestone-1.md`. It needs a positive `spec_version`, one `## Rubric` section, and one `## Tier anchors` section. Define up to ten numbered milestone steps. Also supply your own `STRATEGY.md` and `docs/runbooks/github-issue-roadmap.md`; these are evidence inputs, not bundled private project documents.
-4. Set up the native issue fields used by `scripts/lib/github-issue-roadmap/stewardship-policy.ts`. The implementation uses GitHub's native issue fields, not similarly named Project columns. A repository without the required field support is not ready for live use.
-5. Install and authenticate the required CLIs: Git, GitHub CLI, Claude Code, and Codex. Model adapters retain the original requested models and operating limits. The Codex adapter uses an isolated, pinned app-server installation; see `scripts/github-issue-roadmap-astra-seat-install.ts`. The GLM adapter reads the operator's DPAPI-protected credential from `%USERPROFILE%\.config\glm-opinion\credential.dat` (or `credential-<slot>.dat`).
-6. Review the credential paths and environment boundary in `scripts/run-github-issue-roadmap-sort.ps1`. Its GitHub credential is a DPAPI-protected file at `%USERPROFILE%\.codex\roadmap-shadow-activation\roadmap-shadow-publish-token.dpapi`, read only for commands that need it. Create your own credentials outside the repository. No credentials are included here.
+Constructed illustration, not a customer result. Assume current evidence, no dependency blockers, no pins or existing working set, and agreement on the classifications.
 
-Commit the adapted runtime to your repository's `main` before using the wrapper. It verifies that installation against the remote and refuses a different origin or unmerged code.
+| Issue | Milestone relationship | Value | Effort | Score | Result in this example |
+| --- | --- | ---: | --- | ---: | --- |
+| Fix the failing export action | Blocks the milestone | 7 | High | 9.8 | Now, through the blocker rule |
+| Resume an interrupted draft | In scope, not blocking | 8 | High | 12.8 | Now, through the formula |
+| Clarify the save confirmation | In scope, not blocking | 5 | Low | 10 | Now, after the higher-value improvement |
+| Add a second export format | Outside this milestone | 9 | Low | 32.4 | Parked despite the larger score |
 
-## Commands
+The intended outcome is a working set that supports the release, rather than a list sorted only by easy wins. [The implementation](scripts/lib/github-issue-roadmap/stewardship-backlog.ts) makes those exceptions inspectable.
 
-Run the PowerShell wrapper from the target repository after setup:
+## Why it is built this way
 
-```powershell
-.\scripts\run-github-issue-roadmap-sort.ps1 -Command status
-.\scripts\run-github-issue-roadmap-sort.ps1 -Command init
-.\scripts\run-github-issue-roadmap-sort.ps1 -Command shadow
-```
+- **Separate value, severity, and scope.** An attractive feature is not automatically an emergency. An already-fixed issue is not automatically outside the milestone. These are different facts with different consequences. See the [assessment rubric](scripts/lib/github-issue-roadmap/stewardship-assessment.ts).
+- **Keep disagreement visible.** Value estimates are averaged, adjacent effort estimates resolve to the larger effort, and conflicting categories remain unknown. Missing evidence is not a low score. The [merge tests](scripts/__tests__/roadmap-stewardship-assessment.test.ts) cover these distinctions.
+- **Make reprioritization stable.** A new score alone does not evict current work. Explicit pins and verified emergencies have separate treatment. After a write timeout, the executor observes the result instead of blindly sending the write again. See [backlog compilation](scripts/lib/github-issue-roadmap/stewardship-backlog.ts) and [execution](scripts/lib/github-issue-roadmap/stewardship-executor.ts).
 
-`init` records the initial state. `shadow` collects and assesses without applying proposed issue-field changes. Model calls can consume your provider allowance. Inspect the snapshot and report before passing its identifier to `-Command approve -Snapshot <identifier>`; `run` is the live mutation path. Approval, adoption, current evidence, and readback checks still apply.
+## What I keep manual
 
-Other commands include `preview`, `rehearse`, `pause`, `resume`, `pin`, `release`, `policy-update`, and `lifecycle-receipts`. Argument validation lives in `scripts/github-issue-roadmap-sort.ts`.
+I define the milestone and its anchors, decide unresolved product choices, and review the snapshot where approval is required. The sorter can flag done or stale work; it does not close issues. Human Horizon and Effort pins are distinct from the computed Sort key, which the sorter owns.
 
-The optional Task Scheduler installer prints XML by default and registers a **disabled** task only with `-RegisterDisabled`. Its current schedule requires Windows' Eastern time zone and uses GLM slot `secondary`; adapt those settings deliberately for your machine. It does not silently activate the sorter.
+## Evidence and limits
 
-## Layout
+The [operating record](../results/2026-10-18-to-24.md) includes 165 distinct assessed issues and 298 confirmed action outcomes out of 299 attempted actions during one week. Most runs were partial; the record includes that denominator and the unresolved action. These counts establish use, not ranking quality.
 
-- `scripts/github-issue-roadmap-sort.ts`: command orchestration.
-- `scripts/lib/github-issue-roadmap/stewardship-*`: evidence, model adapters, ranking, state, and execution.
-- `scripts/run-stewardship-seat-job.ps1`: Windows process containment for model calls.
-- `scripts/__tests__/`: synthetic regression tests.
+The formula encodes a preference, not a validated estimate of business return. Squaring a noisy value estimate can amplify its error. There is not yet a published comparison against a simpler ranking method.
 
-Intake and sorter carry copies of their shared roadmap modules so each folder can be tested independently. If adopting both, keep one reviewed set of shared files in the target repository.
+## Explore or adapt
 
-Bundled intake stack descriptors retain opaque rubric and toolchain compatibility identifiers, not verified build attestations for this export. Their prompt hashes match the included prompt and their release is `workflow-export-unqualified`; establish your own reviewed provenance before deployment.
+Built for my Windows 11 workflow. Borrow the method and adapt the assumptions; this is not a drop-in backlog service. [Tests, setup, credentials, commands, and scheduling](ADAPTING.md) are in the adaptation guide. The [sample milestone](examples/milestone-1.md) shows the input you would replace.
