@@ -41,7 +41,7 @@ I define the milestone and its anchors, decide unresolved product choices, and r
 
 ## Evidence and limits
 
-The new sorter was completed the week of October 25, 2026 and is awaiting its first operational run. Debugging and validation are ongoing. The linked source and constructed tests make the method inspectable; there are no validated operating results for this version yet. [Development status](../results/README.md).
+The deployed sorter recorded **143 distinct confirmed board writes across 21 run starts** after policy v6 adoption on October 23. That establishes execution of the policy, not ranking quality. Partial runs, timeouts, and a model usage limit remain part of the operating record. The deployed code evolved during the period; this source kit is a sanitized snapshot. [Dates, counting method, and limits](../results/2026-10-27.md#sorter-applying-the-prioritization-policy).
 
 The formula encodes a preference, not a validated estimate of business return. Squaring a noisy value estimate can amplify its error. There is not yet a published comparison against a simpler ranking method.
 

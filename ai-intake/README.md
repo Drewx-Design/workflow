@@ -31,7 +31,7 @@ I resolve ambiguous matches and product choices and review operations that requi
 
 ## Evidence and limits
 
-This tool is still being tested and refined. The source kit's included tests use constructed evidence; private captures and calibration records are omitted. Validated operating results for the current version are not yet published. [Development status](../results/README.md).
+A snapshot on October 27 found **327 issues carrying the intake marker**, including 109 created since October 7. These are usage counts, not a precision or recall score. Agent-invoked filing is in use; unattended filing remains disabled pending its first-20-artifact recall review. The source kit uses constructed test evidence. [Observation method and limits](../results/2026-10-27.md#intake-turning-findings-into-tracked-work).
 
 The system is deliberately coupled to a candidate schema, repository evidence conventions, and a review process. That setup cost only makes sense if the volume of findings justifies it.
 

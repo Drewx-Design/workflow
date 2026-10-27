@@ -28,7 +28,7 @@ I decide whether to commission scratch publication, install the schedule, releas
 
 ## Evidence and limits
 
-This tool is still being tested and refined. The policy examples show the intended decisions and link to the checks behind them. Validated operating results for the current version are not yet published. [Development status](../results/README.md).
+Seven deployed runs ending October 21–27 recorded **19 completed removals plus one with pruning deferred**. The held backlog grew from 169 to 228, so cleanup is doing useful work but has not brought the backlog under control. The latest run removed nothing when activity evidence was unreadable. [Final outcomes, failures, and counting method](../results/2026-10-27.md#cleanup-completed-removals-and-unresolved-holds). These runs span evolving deployed code, not a benchmark of this exact source snapshot.
 
 The sanitized export was checked with focused policy, admission, path, encoding, and credential-fixture tests; its complete Windows integration suite was not completed during export verification. Windows activity readers and junction behavior are specific to my setup.
 

@@ -1,13 +1,16 @@
-# Development status
+# Operating evidence
 
 [Back to Workflow](../README.md).
 
-As of October 25, 2026, the tools are still being tested and refined. The new sorter was completed this week and has not had its first operational run. There are no validated operating results for its current version yet.
+The tools are in use and still being refined. The [October 27 operating record](2026-10-27.md) separates confirmed outcomes from planned actions, tests, and development activity. It covers the deployed originals, which have evolved beyond the sanitized source snapshots in this repository.
 
-The repository currently provides source code, tests, worked examples, and design explanations. The coordinator also includes sanitized captures of real producer behavior. These let readers inspect the implementation while operational validation continues.
+| Tool | Observed activity | What remains to establish |
+| --- | --- | --- |
+| Sorter | 143 distinct confirmed board-write operations across 21 run starts after policy v6 adoption. | Ranking quality and sustained unattended reliability. |
+| AI intake | 327 issues carried the source marker; 109 were created on or after October 7. | Recall; the unattended filing route remains disabled pending its review gate. |
+| Worktree cleanup | 19 entries finished as removed, plus one with pruning deferred, across seven reviewed runs. | A shrinking held backlog and dependable activity collection. |
+| Easy-Issue Autopilot | One behavior fix received a VERIFIED verdict; human review removed unrelated edits before it shipped. | Development is paused. See the [decision and restart conditions](../case-studies/easy-issue-autopilot.md). |
 
-## Results to add
+These are activity records, not productivity or comparative performance claims. The [measurement method](METHOD.md) explains the boundaries and what I plan to measure next.
 
-After operational runs, I plan to publish a short record identifying the version and observation period, work attempted, outcomes confirmed, holds or failures, operator corrections, and what changed afterward. A comparison of sorting methods will be reported separately from execution reliability. [Measurement approach](METHOD.md).
-
-Earlier journal counts mixed activity from evolving implementations. They have been withdrawn as operating-results evidence for these tools; they did not establish performance of the newly completed sorter. Private development journals remain private.
+The earlier October 18–24 summary remains [withdrawn](2026-10-18-to-24.md). This record uses an explicit sorter adoption boundary and final cleanup dispositions; it does not reinstate the mixed development totals.

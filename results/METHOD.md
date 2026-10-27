@@ -1,8 +1,8 @@
-# Measuring future operating results
+# Measuring operating results
 
-[Development status](README.md).
+[Operating evidence](README.md).
 
-This is a plan for future measurement, not a completed evaluation.
+The [October record](2026-10-27.md) reports bounded activity counts. The following method also sets the requirements for future productivity or comparative-quality evaluations; those evaluations have not yet been completed.
 
 1. Identify the exact version and a fixed observation period. Separate fixture tests, development probes, dry runs, and operational runs. Note version changes during the period.
 2. Count attempts and confirmed outcomes separately. Deduplicate by operation identity rather than journal-row count. Explain partial runs, protective holds, deadlines, defects, and unresolved outcomes.
