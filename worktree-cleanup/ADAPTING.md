@@ -14,6 +14,8 @@ npm test
 
 The dependency installation is for the tests; the cleanup runtime needs no npm packages. Tests use disposable repositories and synthetic session records. `.npmrc` selects the peer resolver used to install the pinned test dependencies.
 
+The sanitized export was checked with focused policy, admission, path, encoding, and credential-fixture tests. Its complete Windows integration suite was not completed during export verification. Check activity readers and junction behavior in the environment where you intend to run it.
+
 ## If you adapt the code
 
 Copy `scripts/` into the primary checkout you want to manage, preserving paths. Replace `example-org/example-repo` in the runtime with its exact GitHub identity. Review the archive and report locations, rescue and scratch classifications, and activity readers before adoption. The primary checkout must have an HTTPS `origin` and an `origin/main` branch.

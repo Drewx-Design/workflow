@@ -29,11 +29,9 @@ A separate crash-recovery test records intent, simulates a stopped process, and 
 
 I resolve ambiguous matches and product choices and review operations that require explicit approval. The exported automatic capability manifest is disabled. A successful assessment or dry run does not grant write authority.
 
-## Evidence and limits
+## In use
 
-A snapshot on October 27 found **327 issues carrying the intake marker**, including 109 created since October 7. These are usage counts, not a precision or recall score. Agent-invoked filing is in use; unattended filing remains disabled pending its first-20-artifact recall review. The source kit uses constructed test evidence. [Observation method and limits](../results/2026-10-27.md#intake-turning-findings-into-tracked-work).
-
-The system is deliberately coupled to a candidate schema, repository evidence conventions, and a review process. That setup cost only makes sense if the volume of findings justifies it.
+I use the agent-invoked filing path during development sessions. It carries source evidence and authored acceptance criteria into tracked work, with ambiguous matches held for review. Fully unattended filing remains disabled pending validation. See the [usage note](../results/2026-10-27.md) for a dated snapshot.
 
 ## Explore or adapt
 

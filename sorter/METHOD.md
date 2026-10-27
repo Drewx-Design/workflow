@@ -96,4 +96,6 @@ Source: [executor](scripts/lib/github-issue-roadmap/stewardship-executor.ts), [p
 
 ## What I would measure next
 
-The new sorter is awaiting its first operational run; [validated operating results are still to come](../results/README.md). To judge the ranking itself, I would compare it with a simple milestone-tier/effort ordering on the same frozen backlog, record my decisions before seeing which method produced each list, and track corrections and completed milestone steps. Until that comparison exists, I treat the formula as an explicit preference I can inspect and revise.
+The sorter is in use; the [usage note](../results/2026-10-27.md) records confirmed board writes. The formula encodes a preference, and squaring a noisy value estimate can amplify its error.
+
+To judge the ranking itself, I would compare it with a simple milestone-tier/effort ordering on the same frozen backlog, record my decisions before seeing which method produced each list, and track corrections and completed milestone steps. That comparison has not yet been completed.

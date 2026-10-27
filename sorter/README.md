@@ -39,11 +39,9 @@ The intended outcome is a working set that supports the release, rather than a l
 
 I define the milestone and its anchors, decide unresolved product choices, and review the snapshot where approval is required. The sorter can flag done or stale work; it does not close issues. Human Horizon and Effort pins are distinct from the computed Sort key, which the sorter owns.
 
-## Evidence and limits
+## In use
 
-The deployed sorter recorded **143 distinct confirmed board writes across 21 run starts** after policy v6 adoption on October 23. That establishes execution of the policy, not ranking quality. Partial runs, timeouts, and a model usage limit remain part of the operating record. The deployed code evolved during the period; this source kit is a sanitized snapshot. [Dates, counting method, and limits](../results/2026-10-27.md#sorter-applying-the-prioritization-policy).
-
-The formula encodes a preference, not a validated estimate of business return. Squaring a noisy value estimate can amplify its error. There is not yet a published comparison against a simpler ranking method.
+I use the sorter to apply the milestone policy to my GitHub board. Its [usage note](../results/2026-10-27.md) records confirmed field changes. The formula expresses my prioritization preferences; its [tradeoffs and evaluation approach](METHOD.md#what-i-would-measure-next) explain how I would assess ranking quality.
 
 ## Explore or adapt
 

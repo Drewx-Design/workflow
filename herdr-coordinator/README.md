@@ -25,11 +25,9 @@ This avoids treating “I did not receive a confirmation” as “the worker did
 
 The coordinator does not perform the worker's task, answer product questions for me, or merge PRs. I supply decisions and authorize continuation after holds. Cleanup of merged work is available on request.
 
-## Evidence and limits
+## Implementation evidence
 
-This tool is still being tested and refined. Its producer captures document real integration behavior, but they are not a performance benchmark. Validated operating results for the current version are not yet published. [Development status](../results/README.md).
-
-The [fixture notes](tests/fixtures/README.md) document actual producer behavior that changed the implementation, including question forms appearing differently across Claude Code versions. The tests combine sanitized captures with constructed scenarios. This integration needs maintenance as the producer formats change.
+The [fixture notes](tests/fixtures/README.md) document real producer behavior that shaped the implementation, including question forms appearing differently across Claude Code versions. Tests combine sanitized captures with constructed scenarios. Producer-format changes require corresponding integration maintenance.
 
 ## Explore or adapt
 

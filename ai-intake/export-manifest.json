@@ -3,7 +3,7 @@
   "files": {
     ".npmrc": "a093bb2fed59d699b7f9a62a5203cc196054c624e9c39c6d908c9e7db5dd2464",
     "ADAPTING.md": "1ae0d38a95e866f320c383f2cbb8f3bc885fe9f298757a823027cce843e8ed48",
-    "README.md": "c8579cb5eafe20d2143ca6ffa2aa0b17d494a592d7534a8ea80e4cd2d4c3a826",
+    "README.md": "cf011466cb507a0cdd141ecad3e2a600d730bddfc493393c2e90fe97732f861c",
     "package-lock.json": "142716810d775a36bcd12b2b5441f23eb6b0211df682a6f69e59006a48421174",
     "package.json": "9084e64e07e40ab926bd6d8823e63040bcee211e34c7b41978ff71d60ebf700a",
     "scripts/__tests__/__helpers__/canonical-snapshot-v2.ts": "ece51b0190e8d986fd6cd84e386483f8d5821fd350a1f18fe0d1540befaca146",
