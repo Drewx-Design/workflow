@@ -25,10 +25,19 @@ These are my configured roles, rather than a general ranking of models:
 | Consequential architecture and readiness checks | Codex Astra | Is there a material implementation or release problem? |
 | Unresolved design and interaction choices | Claude Fable 5.1 | Which alternative best serves the user, and what evidence could reverse that choice? |
 | Premise and risk review | GLM-5.3 | Which assumption, failure case, or alternative has been missed? |
+| Experimental scope audit | Kimi K3.1 Pro | Does the implementation add unrequested interface elements or omit planned ones? |
 
 Routine detached Codex workers currently request `gpt-6.1-sol` at `xhigh`; senior checkpoints request `gpt-6-astra`, with `high` for implementation and debugging or `xhigh` for review. These are dated settings. The routine allocation remains provisional while a planned comparison is pending.
 
 If Claude is unavailable, Codex can fill its planning and synthesis roles, with the substitution recorded and a separate GLM review for substantial plans. A second model from the same family is still same-family review.
+
+### Current experiment: Kimi scope review
+
+From October 26 to November 26, I am testing Kimi K3.1 Pro as an advisory fourth model family on roughly ten UI changes implemented without me present. It compares the code changes with the agreed plan, looking for unrequested controls, messages, states, or behaviors, as well as missing planned elements.
+
+I track confirmed issues it finds that other reviewers missed, false flags, and the time needed to verify its findings. It receives evidence matched to the existing review so a richer brief does not get mistaken for a better model. The trial alternates `high` and `max` reasoning effort and stops early after five PRs if there are no confirmed unique catches or false flags exceed catches.
+
+Kimi does not implement changes or replace the required reviews in this trial. Its findings must be checked against the plan and source before they affect a review decision. Results are pending.
 
 ## Rules that shape the work
 
