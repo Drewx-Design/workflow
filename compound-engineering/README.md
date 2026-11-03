@@ -4,7 +4,7 @@
 
 I use Compound Engineering to move from a product question to a reviewed change. My adaptations divide responsibilities between models, keep implementation within the agreed scope, and carry useful lessons into the next task. I define the product goals and make the decisions that need my judgment.
 
-The underlying method and plugin come from [Compound Engineering, maintained by Kieran Klaassen and Trevin Chow](https://every.to/guides/compound-engineering). This page describes my configuration and working rules as of **October 28, 2026**. The tools elsewhere in this repository support that workflow.
+The underlying method and plugin come from [Compound Engineering, maintained by Kieran Klaassen and Trevin Chow](https://every.to/guides/compound-engineering). This page describes my configuration and working rules as of **November 3, 2026**. The tools elsewhere in this repository support that workflow; the [development notes](#development-notes) distinguish recent work from the published source snapshots.
 
 ## From question to working product
 
@@ -33,13 +33,15 @@ If Claude is unavailable, Codex can fill its planning and synthesis roles, with 
 
 ### Current experiment: Kimi scope review
 
-From October 26 to November 26, I am testing Kimi K3.1 Pro as an advisory fourth model family on roughly ten UI changes implemented without me present. It compares the code changes with the agreed plan, looking for unrequested controls, messages, states, or behaviors, as well as missing planned elements.
+From October 26 to November 26, I am testing Kimi K3.1 Pro as an advisory fourth model family on roughly ten UI changes implemented without me present. It compares the final changes, after review and fixes, with the agreed plan or issue criteria. It looks for unrequested controls, messages, states, or behaviors, as well as missing required elements.
 
-I track confirmed issues it finds that other reviewers missed, false flags, and the time needed to verify its findings. It receives evidence matched to the existing review so a richer brief does not get mistaken for a better model. The trial alternates `high` and `max` reasoning effort and stops early after five PRs if there are no confirmed unique catches or false flags exceed catches.
+I track confirmed issues it finds that other reviewers missed, false flags, and the time needed to verify its findings. Each applicable PR records the audit or why it was not run. Two reasoning-effort settings are assigned by a rule fixed in advance. The trial stops early after five counted PRs if there are no confirmed unique catches or false flags exceed catches.
 
 Kimi does not implement changes or replace the required reviews in this trial. Its findings must be checked against the plan and source before they affect a review decision. Results are pending.
 
 ## Rules that shape the work
+
+**Choose the smallest adequate solution.** Before dividing a substantial change into implementation units, I ask what it must handle, what can stay with a person, and when it should stop. A new retry, queue, fallback, or safeguard needs a requirement from me or the task, or a concrete failure case. Narrowing the scope or leaving an uncertain case for inspection can be the better response. Reviewers distinguish observed problems from hypothetical ones; tests and verification still apply.
 
 **Settle disagreements with evidence.** Product alignment, implementation readiness, and architectural risk receive separate verdicts. Reviewers see the same frozen plan without each other's conclusions. A source-level finding needs a response grounded in code, tests, traces, or the agreed behavior; agreement between models does not settle it.
 
@@ -59,11 +61,23 @@ The resulting rule is specific: use the design reviewer when a consequential des
 
 ## Keeping judgment and learning in the loop
 
-My October 28 update makes product inspection at merge an explicit place to capture corrections and preferences. Only a preference I actually state can become guidance; approving a PR does not imply that I want every choice in it repeated.
+My November 3 update puts the learning attempt before the PR opens when the work exposed an incorrect debugging hypothesis or an addition outside the plan. The PR records the saved lesson or the reason there was nothing durable to keep. This keeps the learning close to the work that produced it.
 
-The update also introduces a weekly explanation of recently merged work and a five-UI-PR trial of an additional exploratory product check. Explanations help me understand the mechanisms I am delegating. The trial asks whether the extra check finds something existing review and user testing miss. These are new practices whose results are still to be assessed.
+Product inspection at merge is where I can add my own corrections and preferences. Only a preference I actually state can become guidance; approving a PR does not imply that I want every choice in it repeated.
+
+The weekly explanation of recently merged work and the five-UI-PR trial of an additional exploratory product check remain part of the October 28 update. Explanations help me understand the mechanisms I am delegating. The trial asks whether the extra check finds something existing review and user testing miss. These practices are still being evaluated.
 
 Useful lessons go into the existing Compound Engineering knowledge files with their context and rationale. A routine change may produce no reusable lesson. The aim is to make the next relevant task easier without filling the instructions with rules that apply everywhere.
+
+## Development notes
+
+These November 3 notes describe work in my development repository. The published tool folders remain dated source snapshots; the additions below are not included in those exports.
+
+**Sorter: explain selection, then follow the outcome.** New reporting has merged into the development repository. It explains why issues stayed out of the working set and follows considered work through eligibility, selection, confirmed board placement, and later outcomes. A replay can test whether removing a particular rule would have changed admission, while reporting the coverage of the evidence.
+
+That gives me a way to investigate an apparently surprising ranking. A high score can still sit outside Now because the work lacks definition, falls outside the milestone, or has no available slot. The [published method](../sorter/METHOD.md) explains those tradeoffs; the newer reports make their effects inspectable. The first outcome scorecard establishes a baseline. Its follow-up window is still maturing; ranking quality and delivery effects remain to be measured.
+
+**Cleanup: narrow the automatic job.** The current development branch limits scheduled cleanup to merged, clean, inactive Windows checkouts. Dirty, unmerged, and complex recovery cases remain for supervised handling. It also keeps the installed executable version stable until an explicit reinstall. This is an application of the smallest-solution rule: automate ordinary completed work and preserve the operator's control over exceptions. Integration and installation of this narrower version are not confirmed in this snapshot.
 
 ## How the tools fit
 

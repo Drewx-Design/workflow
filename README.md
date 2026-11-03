@@ -27,6 +27,8 @@ I use and refine these tools in my Windows workflow. The sorter makes my priorit
 
 The published versions are sanitized reference snapshots, shared so others can inspect the decisions and adapt useful ideas. Their manifests identify the exported source revision. A short [usage note](results/2026-10-27.md) records activity from the deployed tools.
 
+The [November 3 workflow update](compound-engineering/README.md) adds how I keep implementations small, capture lessons before opening a PR, and evaluate Kimi on the final changes. Its [development notes](compound-engineering/README.md#development-notes) cover new sorter reporting and the work to narrow automatic cleanup, with their status separate from the published source kits.
+
 ## Borrowing the ideas
 
 I built these for my own workflow on **Windows 11**. I'm sharing them so you can borrow the ideas, learn from the decisions, and adapt useful parts. They aren't designed to be copied directly into another setup: they assume particular tools, repository conventions, and ways of working.
