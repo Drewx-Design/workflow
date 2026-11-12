@@ -17,6 +17,7 @@ from unittest import mock
 import actions
 import adapters
 import herdr_coord
+import lanes
 import registry
 import start
 from test_start import herdr_identity
@@ -89,6 +90,8 @@ class FakeOps:
         self.calls.append((args, kwargs))
         if args[:2] in {("tab", "get"), ("pane", "get"), ("tab", "list"), ("pane", "list")}:
             return herdr_identity(*args, **kwargs)
+        if args[:2] == ("pane", "process-info"):
+            return success({"result": {"process_info": {"pane_id": args[2], "foreground_processes": [{"name": "claude.exe", "pid": os.getpid()}]}}})
         if args[:2] in {("workspace", "get"), ("workspace", "rename")}:
             assert 0 < kwargs["timeout"] <= start.COMMAND_TIMEOUT
             if args[1] == "get":
@@ -108,6 +111,9 @@ class FakeOps:
         if args[:2] == ("agent", "get"):
             state = self.statuses.get(name, "idle")
             agent = copy.deepcopy(AGENTS[state])
+            agent["name"] = name
+            registered = next((worker for worker in registry.load()["workers"].values() if worker.get("agent_name") == name), {})
+            agent["cwd"] = registered.get("worktree_path")
             if session:
                 agent["agent_session"] = {"value": session}
             else:
@@ -371,7 +377,7 @@ class ActionTests(unittest.TestCase):
     def test_handoff_uses_the_live_target_tag_and_stores_it_on_commit(self):
         binding = {"lane": "seo", "label_seen": "c12:issues", "source": "tab label", "explicit": False,
                    "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
-                   "pane_id": "target-pane"}
+                   "pane_id": "target-pane", "contact": "coord-a [abc123]"}
         for snapshot, bindings, tag in (
             ({"tab_ids": {"target-tab"}, "controller_counts": {"target-session": 1}},
              {"target-tab": binding}, "C12"),
@@ -380,7 +386,8 @@ class ActionTests(unittest.TestCase):
             (None, {"target-tab": binding}, "seo"),
         ):
             with self.subTest(snapshot=snapshot, bindings=bindings):
-                self.prepare_handoff(lane="main", label_tag="C3", title="fix: faster issue filing")
+                self.prepare_handoff(lane="main", label_tag="C3", coordinator_contact="source [123456]",
+                                     title="fix: faster issue filing")
                 registry.update(lambda doc: (doc["tab_bindings"].clear(), doc["tab_bindings"].update(bindings)))
                 self.ops.workspace_labels[self.workspace_id] = "C3 #7 faster issue filing"
                 with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot):
@@ -389,8 +396,54 @@ class ActionTests(unittest.TestCase):
                 self.assertEqual(result["workspace_label"], expected)
                 self.assertEqual(self.ops.workspace_labels[self.workspace_id], expected)
                 self.assertEqual(actions.worker_named("worker")["label_tag"], tag)
+                contact = binding["contact"] if tag == "C12" else None
+                self.assertEqual(actions.worker_named("worker")["coordinator_contact"], contact)
                 event = [e for e in registry.read_events(0, lane="seo") if e["kind"] == "worker_handoff"][-1]
                 self.assertEqual(event["payload"]["label_tag"], tag)
+                self.assertEqual(event["payload"]["coordinator_contact"], contact)
+                self.assertFalse(self.ops.sends)
+                self.assertFalse(self.ops.start_calls)
+
+    def test_handoff_resume_uses_receiving_lane_coordinator(self):
+        self.prepare_handoff(lane="main", label_tag="C2", coordinator_contact="source [123456]")
+        binding = {"lane": "seo", "label_seen": "C4-issues", "source": "tab label", "explicit": False,
+                   "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                   "pane_id": "target-pane", "contact": "receiving coordinator [bcefc3]"}
+        registry.update(lambda doc: doc["tab_bindings"].update({"target-tab": binding}))
+        snapshot = {"tab_ids": {"target-tab"}, "controller_counts": {"target-session": 1}}
+        with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot):
+            actions.handoff("worker", "seo", lane="main", ops=self.ops)
+        worker = actions.worker_named("worker")
+        self.assertEqual(worker["label_tag"], "C4")
+        self.assertEqual(worker["coordinator_contact"], binding["contact"])
+        self.assertFalse(self.ops.sends)
+        self.assertFalse(self.ops.start_calls)
+        self.set_state("lost")
+        result = actions.resume("worker", lane="seo", ops=self.ops, action_id="handoff-resume")
+        self.assertEqual(result["status"], "delivered")
+        args = self.ops.start_calls[0]
+        self.assertEqual(args[args.index("--append-system-prompt") + 1],
+                         lanes.worker_note("seo", "C4", binding["contact"]))
+        self.assertIn("lane seo, coordinated by C4 (messaging name: receiving coordinator [bcefc3])", args[-1])
+
+    def test_resume_names_the_lanes_current_contact_after_a_coordinator_rename(self):
+        self.prepare_handoff(lane="seo", label_tag="C4", coordinator_contact="old name [111111]")
+        binding = {"lane": "seo", "label_seen": "C4-issues", "source": "tab label", "explicit": False,
+                   "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
+                   "pane_id": "target-pane", "contact": "new name [222222]"}
+        registry.update(lambda doc: doc["tab_bindings"].update({"target-tab": binding}))
+        self.set_state("lost")
+        actions.resume("worker", lane="seo", ops=self.ops, action_id="renamed-resume")
+        args = self.ops.start_calls[0]
+        self.assertEqual(args[args.index("--append-system-prompt") + 1],
+                         lanes.worker_note("seo", "C4", "new name [222222]"))
+
+    def test_resume_without_one_lane_contact_accepts_no_session_messages(self):
+        self.prepare_handoff(lane="seo", label_tag="C4", coordinator_contact="moved away [111111]")
+        self.set_state("lost")
+        actions.resume("worker", lane="seo", ops=self.ops, action_id="no-contact-resume")
+        args = self.ops.start_calls[0]
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], lanes.worker_note("seo", "C4", None))
 
     def test_handoff_failure_restores_the_stored_source_tag_and_title(self):
         self.prepare_handoff(lane="main", label_tag="C3", title="feat(scope): faster issue filing")
@@ -447,22 +500,23 @@ class ActionTests(unittest.TestCase):
     def test_handoff_returns_only_a_known_live_target_owners_contact(self):
         binding = {"lane": "seo", "label_seen": "SEO", "source": "tab label", "explicit": False,
                    "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
-                   "pane_id": "target-pane", "contact": "norm-98 [bcefc3]"}
+                   "pane_id": "target-pane", "contact": "coord-a [abc123]"}
         live = {"tab_ids": set(), "controller_counts": {"target-session": 1}}
         cases = ((None, {"target-tab": binding}, None),
                  ({"tab_ids": {"target-tab"}, "controller_counts": {}}, {"target-tab": binding}, None),
                  (live, {}, None),
-                 (live, {"target-tab": binding}, "norm-98 [bcefc3]"),
+                 (live, {"target-tab": binding}, "coord-a [abc123]"),
                  (live, {"stale-tab": {**binding, "controller": {**binding["controller"], "value": "dead"}},
                          "target-tab": {key: value for key, value in binding.items() if key != "contact"}}, None),
                  (live, {"other-tab": {**binding, "lane": "app"}}, None))
         for snapshot, bindings, contact in cases:
             with self.subTest(snapshot=snapshot, bindings=bindings):
-                self.prepare_handoff(lane="main")
+                self.prepare_handoff(lane="main", coordinator_contact="source [123456]")
                 registry.update(lambda doc: (doc["tab_bindings"].clear(), doc["tab_bindings"].update(bindings)))
                 with mock.patch.object(actions.lanes, "read_snapshot", return_value=snapshot):
                     result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
                 self.assertEqual(result["state"], "handed_off")
+                self.assertEqual(actions.worker_named("worker")["coordinator_contact"], contact)
                 if contact is None:
                     self.assertNotIn("target_contact", result)
                 else:
@@ -503,7 +557,7 @@ class ActionTests(unittest.TestCase):
                 self.prepare_handoff(lane="main")
                 binding = {"lane": "seo", "label_seen": "SEO", "source": "tab label", "explicit": False,
                            "controller": {"agent": "claude", "kind": "id", "value": "target-session"},
-                           "pane_id": "target-pane", "contact": "norm-98 [bcefc3]"}
+                           "pane_id": "target-pane", "contact": "coord-a [abc123]"}
                 registry.update(lambda doc: doc["tab_bindings"].update({"target-tab": binding}))
                 failed = []
 
@@ -527,7 +581,7 @@ class ActionTests(unittest.TestCase):
                         mock.patch.object(registry, "save", side_effect=flaky_save):
                     result = actions.handoff("worker", "seo", lane="main", ops=self.ops)
                 self.assertEqual(result["state"], "handed_off")
-                self.assertEqual(result["target_contact"], "norm-98 [bcefc3]")
+                self.assertEqual(result["target_contact"], "coord-a [abc123]")
                 self.assertEqual(result["target_contact_stale"], "renamed")
                 self.assertEqual(bool(failed), fail_after_commit)
                 self.assertEqual("warning" in result, fail_after_commit)
@@ -751,7 +805,8 @@ class ActionTests(unittest.TestCase):
         self.assertFalse([e for e in registry.read_events(0) if e["kind"] == "worker_handoff"])
 
     def test_handoff_during_prepared_entry_refuses_without_cross_lane_send(self):
-        self.prepare_handoff("starting", phase="agent_started", start_owner=start._start_owner())
+        self.prepare_handoff("starting", phase="agent_started", start_owner=start._start_owner(),
+                             pane_id=AGENTS["idle"]["pane_id"], workspace_id=AGENTS["idle"]["workspace_id"])
         append = registry.append_event
         attempted = []
         sends = []
@@ -1585,7 +1640,11 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(registry.load()["actions"]["unknown"]["delivery_unknown_reported"])
 
     def test_resume_lost_uses_explicit_model_mode_and_confirms_session_before_prompt(self):
-        self.set_state("lost")
+        self.set_state("lost", lane="seo", label_tag="C3", coordinator_contact="stored at start [000000]")
+        # The note names the lane's recorded contact, not the one stored at start.
+        registry.update(lambda doc: doc["tab_bindings"].update({"seo-tab": {
+            "lane": "seo", "pane_id": "seo-pane", "contact": "coord-a [abc123]",
+            "controller": {"agent": "claude", "kind": "id", "value": "seo-session"}}}))
         registry.update(lambda doc: doc["config"].update(permission_mode="bypassPermissions"))
         self.ops.sessions["worker"] = "new-session"
         self.ops.write("new-session", [PROMPT])
@@ -1593,7 +1652,9 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(result["status"], "delivered")
         self.assertEqual(self.ops.start_calls[0], (
             "agent", "start", "worker", "--kind", "claude", "--pane", "pane-1", "--",
-            "--resume", "session-1", "--model", "claude-opus-5-5", "--permission-mode", "bypassPermissions"))
+            "--resume", "session-1", "--model", "claude-opus-5-5", "--permission-mode", "bypassPermissions",
+            "--append-system-prompt", lanes.worker_note("seo", "C3", "coord-a [abc123]")))
+        self.assertIn("lane seo, coordinated by C3 (messaging name: coord-a [abc123])", self.ops.start_calls[0][-1])
         worker = registry.load()["workers"]["worker"]
         self.assertEqual(worker["session_id"], "new-session")
         self.assertEqual(worker["session_history"], ["session-1", "new-session"])
@@ -1604,15 +1665,24 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(len(self.ops.sends), 1)
 
     def test_resume_unconfirmed_session_and_start_timeout_send_no_prompt(self):
-        for error in (None, "timeout"):
-            with self.subTest(error=error):
-                self.set_state("lost", pending_action_id=None)
-                self.ops.sessions["worker"] = None
-                self.ops.error = error
-                with mock.patch.object(start, "SESSION_TIMEOUT", 0):
-                    result = actions.resume("worker", ops=self.ops)
-                self.assertEqual(result["status"], "delivery_unknown")
-                self.assertFalse(self.ops.sends)
+        self._assert_unconfirmed_resume(None)
+
+    def test_resume_start_timeout_sends_no_prompt(self):
+        self._assert_unconfirmed_resume("timeout")
+
+    def _assert_unconfirmed_resume(self, error):
+        self.set_state("lost", pending_action_id=None)
+        self.ops.sessions["worker"] = None
+        self.ops.error = error
+        with mock.patch.object(start, "SESSION_TIMEOUT", 0):
+            result = actions.resume("worker", ops=self.ops)
+        self.assertEqual(result["status"], "delivery_unknown")
+        self.assertFalse(self.ops.sends)
+        self.set_state("lost")
+        with self.assertRaisesRegex(actions.ActionError, "Previous action delivery is unknown"):
+            actions.resume("worker", ops=self.ops)
+        self.assertEqual(len(self.ops.start_calls), 1)
+        self.assertFalse(self.ops.sends)
 
     def test_blocked_resume_is_not_sent_and_exposes_a_relayable_question(self):
         import watch

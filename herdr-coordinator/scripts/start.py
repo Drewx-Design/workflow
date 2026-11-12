@@ -87,7 +87,8 @@ def _owns_start(worker) -> bool:
 
 
 def _can_start(worker) -> bool:
-    return worker.get("state") == "starting" and _owns_start(worker)
+    return (not worker.get("adhoc") and worker.get("issue") is not None
+            and worker.get("state") == "starting" and _owns_start(worker))
 
 
 def parse_entry_command(labels: list[str], body: str) -> tuple[str, str] | None:
@@ -164,9 +165,10 @@ def _record(worker_id, kind, *, action_changes=None, **changes) -> dict:
 def _slots(doc) -> int:
     # A worker claimed by cleanup keeps the slot it held until cleanup succeeds.
     return sum(worker.get("state") in SLOT_STATES
+               or (worker.get("state") == "storage_pending" and bool(worker.get("agent_name")))
                or (worker.get("state") == "cleaning"
                    and (worker.get("cleanup_from") or {}).get("state") in SLOT_STATES)
-               for worker in doc["workers"].values())
+               for worker in doc["workers"].values() if not worker.get("adhoc"))
 
 
 def _has_slot(doc) -> bool:
@@ -182,6 +184,8 @@ def _claim(doc, worker, owner):
 
 def _admit(candidate) -> tuple[dict, bool]:
     """Reserve a slot or enqueue under one update, without calling external tools."""
+    if candidate.get("adhoc") or candidate.get("issue") is None:
+        raise StartError("start requires an issue worker; use adopt for an existing session")
     worker_id = candidate["worker_id"]
     owner = _start_owner()
     outcome = {}
@@ -225,87 +229,36 @@ def _wait_for_path(path):
         time.sleep(min(POLL_INTERVAL, remaining))
 
 
-def _refuse_open_workspace(path, target, ops):
-    workspaces = _envelope(_call(ops.herdr, "workspace", "list", timeout=COMMAND_TIMEOUT)).get("workspaces")
-    if not isinstance(workspaces, list):
-        raise StartError("herdr returned invalid workspace list")
-    for workspace in workspaces:
-        checkout = (workspace.get("worktree") or {}).get("checkout_path")
-        if checkout and os.path.normcase(os.path.realpath(checkout)) == target:
-            raise StartError(f"{path} already has herdr workspace {workspace.get('workspace_id')}")
-
-
 def _create_worktree(worker, ops):
     worker_id = worker["worker_id"]
     lane = worker.get("lane", "main")
     label = lanes.workspace_label(worker["repo_path"], lane, worker["issue"],
                                   worker.get("title", ""), tag=worker.get("label_tag"))
-    path = worker["worktree_path"]
-    target = os.path.normcase(os.path.realpath(path))
-    if not worker.get("worktree_created") and Path(path).exists():
-        listed = _call(ops.git, "worktree", "list", "--porcelain",
-                       cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
-        registration = None
-        for record in re.split(r"\r?\n\r?\n", listed.stdout):
-            lines = record.splitlines()
-            if any(os.path.normcase(os.path.realpath(line[len("worktree "):])) == target
-                   for line in lines if line.startswith("worktree ")):
-                registration = lines
-                break
-        if registration is None:
-            raise StartError(f"{path} already exists but is not a registered worktree")
-        if f"branch refs/heads/{worker['branch']}" not in registration:
-            raise StartError(f"{path} is not registered on branch {worker['branch']}")
-        status = _call(ops.git, "status", "--porcelain", cwd=path, timeout=COMMAND_TIMEOUT)
-        if status.stdout.strip():
-            raise StartError(f"{path} has uncommitted changes")
-        # Adopted in memory only: it is recorded with the workspace created for it below, so a refusal
-        # or failure in between never marks the tree as one cleanup may remove.
-        worker = {**worker, "worktree_created": True}
     if not worker.get("worktree_created"):
-        _call(ops.git, "fetch", "origin", cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
-        result = _run(
-            ops.herdr, "worktree", "create", "--cwd", worker["repo_path"],
-            "--branch", worker["branch"], "--base", "origin/main",
-            "--path", worker["worktree_path"], "--label", label, "--no-focus",
-            timeout=COMMAND_TIMEOUT,
-        )
-        if result.ok:
-            envelope = _envelope(result)
-            workspace = envelope.get("workspace", {})
-            pane = envelope.get("root_pane", {})
-            if not isinstance(workspace, dict) or not isinstance(pane, dict):
-                raise StartError("herdr returned invalid workspace or pane data")
-            checkout = workspace.get("worktree", {}).get("checkout_path")
-            expected_path = worker["worktree_path"]
-            worker = _record(
-                worker_id, "worker_phase", phase="worktree",
-                workspace_id=workspace.get("workspace_id"), pane_id=pane.get("pane_id"),
-                worktree_path=checkout or worker["worktree_path"], worktree_created=True,
-            )
-            if not checkout or os.path.normcase(str(Path(checkout).resolve())) != os.path.normcase(expected_path):
-                raise StartError("herdr did not return the requested sibling worktree path")
-            return worker
-        # Only a definite unsupported command permits fallback. A timeout or
-        # ambiguous error may already have created resources, so never retry it.
-        if result.error_code not in {"unknown_command", "unsupported_command"}:
-            raise StartError(f"{result.error_code}: {result.error_message or result.stderr}")
-        _call(
-            ops.git, "worktree", "add", "-b", worker["branch"], worker["worktree_path"],
-            "origin/main", cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT,
-        )
-        worker = _record(worker_id, "worktree_created", worktree_created=True)
+        _call(ops.git, "worktree", "add", "-b", worker["branch"], worker["worktree_path"],
+              cwd=worker["repo_path"], timeout=COMMAND_TIMEOUT)
+        def remember_creation(doc):
+            current = doc["workers"][worker_id]
+            if not _can_start(current):
+                raise StartError("worker changed during worktree creation")
+            current["worktree_created"] = True
+
+        worker = registry.update(remember_creation)["workers"][worker_id]
     _wait_for_path(worker["worktree_path"])
-    _refuse_open_workspace(path, target, ops)
     result = _call(
-        ops.herdr, "workspace", "create", "--cwd", worker["worktree_path"],
+        ops.herdr, "worktree", "open", "--cwd", worker["repo_path"], "--path", worker["worktree_path"],
         "--label", label, "--no-focus", timeout=COMMAND_TIMEOUT,
     )
     envelope = _envelope(result)
+    workspace, pane, tab = envelope.get("workspace", {}), envelope.get("root_pane", {}), envelope.get("tab", {})
+    checkout = workspace.get("worktree", {}).get("checkout_path")
+    if not checkout or os.path.normcase(os.path.realpath(checkout)) != os.path.normcase(os.path.realpath(worker["worktree_path"])):
+        raise StartError("herdr did not open the requested worktree path")
+    if not workspace.get("workspace_id") or not pane.get("pane_id") or not tab.get("tab_id"):
+        raise StartError("herdr returned no workspace, tab or root pane identity")
     return _record(
         worker_id, "worker_phase", phase="worktree", worktree_created=True,
-        workspace_id=envelope.get("workspace", {}).get("workspace_id"),
-        pane_id=envelope.get("root_pane", {}).get("pane_id"),
+        workspace_id=workspace["workspace_id"], pane_id=pane["pane_id"], tab_id=tab["tab_id"],
     )
 
 
@@ -313,6 +266,16 @@ def _start_agent(worker, ops):
     _wait_for_path(worker["worktree_path"])
     if not worker.get("workspace_id") or not worker.get("pane_id"):
         raise StartError("worktree creation returned no workspace or pane id")
+    if worker.get("agent_name"):
+        result = _call(ops.herdr, "agent", "get", worker["agent_name"], timeout=COMMAND_TIMEOUT)
+        agent = _envelope(result).get("agent", {})
+        if (agent.get("name") != worker["agent_name"] or agent.get("pane_id") != worker["pane_id"]
+                or agent.get("workspace_id") != worker["workspace_id"]
+                or not isinstance(agent.get("cwd"), str) or not agent["cwd"]
+                or not Path(os.path.normcase(os.path.realpath(agent["cwd"]))).is_relative_to(
+                    os.path.normcase(os.path.realpath(worker["worktree_path"])))):
+            raise StartError("recorded worker identity could not be confirmed")
+        return _record(worker["worker_id"], "worker_phase", phase="agent_started")
     prefix = repo_root.slug(worker["repo_path"])
     if not prefix or not ("a" <= prefix[0] <= "z"):
         prefix = "r" + prefix
@@ -320,6 +283,7 @@ def _start_agent(worker, ops):
     if len(suffix) >= 32:
         raise StartError("issue number is too long for a herdr agent name")
     name = prefix[:32 - len(suffix)].rstrip("-") + suffix
+    worker = _record(worker["worker_id"], "worker_launch_intent", agent_name=name)
     deadline = time.monotonic() + AGENT_START_TIMEOUT
     error = None
     while True:
@@ -333,6 +297,8 @@ def _start_agent(worker, ops):
             ops.herdr, "agent", "start", name, "--kind", "claude", "--pane", worker["pane_id"],
             "--timeout", str(AGENT_TIMEOUT_MS), "--", "--model", AGENT_MODEL,
             "--permission-mode", worker["permission_mode"],
+            "--append-system-prompt", lanes.worker_note(
+                worker.get("lane", "main"), worker.get("label_tag"), worker.get("coordinator_contact")),
             timeout=min(COMMAND_TIMEOUT, remaining),
         )
         if result.ok:
@@ -343,11 +309,12 @@ def _start_agent(worker, ops):
             raise error
         if remaining > 0:
             time.sleep(min(POLL_INTERVAL, remaining))
-    return _record(worker["worker_id"], "worker_phase", phase="agent_started", agent_name=name)
+    worker = _record(worker["worker_id"], "worker_phase", phase="agent_started", agent_name=name)
+    return worker
 
 
 def _send_entry(worker, ops):
-    if worker.get("action_id"):
+    if not _can_start(worker) or worker.get("action_id"):
         return worker  # A persisted send intent is reconciled, never resent.
     action_id = uuid.uuid4().hex
     command_args = worker["entry_args"]
@@ -523,13 +490,13 @@ def _run_worker(worker, ops, *, keepalive=None, resend_entry=False):
         )
 
 
-def start_issues(repo_path, issues, *, lane="main", tag=None, ops=adapters) -> list[dict]:
+def start_issues(repo_path, issues, *, lane="main", tag=None, contact=None, ops=adapters) -> list[dict]:
     repo = str(Path(repo_path).resolve())
     tag = lanes.coordinator_tag(tag, lane, repo)
     summaries = []
     for position, issue in enumerate(issues):
         try:
-            _start_issue(repo, issue, summaries, ops, lane=lane, tag=tag)
+            _start_issue(repo, issue, summaries, ops, lane=lane, tag=tag, contact=contact)
         except Exception as exc:
             # Earlier issues may have started: the caller reports what the registry holds for each,
             # never a blanket failure.
@@ -540,6 +507,78 @@ def start_issues(repo_path, issues, *, lane="main", tag=None, ops=adapters) -> l
             ]
             raise
     return summaries
+
+
+def adopt(repo_path, name, *, lane="main", tag=None, label=None, caller_pane_id=None, ops=adapters):
+    """Register an existing Claude session without sending it any input."""
+    repo = str(Path(repo_path).resolve())
+    result = _run(ops.herdr, "agent", "get", name, timeout=COMMAND_TIMEOUT)
+    if not result.ok:
+        # Pane ids are not agent names on every herdr version.
+        listing = _envelope(_call(ops.herdr, "agent", "list", timeout=COMMAND_TIMEOUT)).get("agents")
+        matches = [agent for agent in listing if isinstance(agent, dict) and agent.get("pane_id") == name
+                   and agent.get("name")] if isinstance(listing, list) else []
+        if len(matches) != 1:
+            raise StartError(f"cannot resolve agent or pane {name!r}: {_failure(result)}")
+        result = _call(ops.herdr, "agent", "get", matches[0]["name"], timeout=COMMAND_TIMEOUT)
+    agent = _envelope(result).get("agent")
+    if not isinstance(agent, dict) or agent.get("agent") != "claude":
+        raise StartError("adopt requires a claude agent")
+    session_info = agent.get("agent_session")
+    session = session_info.get("value") if isinstance(session_info, dict) else None
+    if not isinstance(session, str) or not session.strip():
+        raise StartError("agent has no session id")
+    for key in ("name", "pane_id", "workspace_id", "cwd"):
+        if not isinstance(agent.get(key), str) or not agent[key].strip():
+            raise StartError(f"agent has no {key}")
+    if agent["pane_id"] == (caller_pane_id or os.environ.get("HERDR_PANE_ID")):
+        raise StartError("cannot adopt the caller's own pane")
+    listed = _call(ops.git, "worktree", "list", "--porcelain", cwd=repo, timeout=COMMAND_TIMEOUT)
+    roots = [line[len("worktree "):] for line in listed.stdout.splitlines() if line.startswith("worktree ")]
+    cwd = os.path.normcase(os.path.realpath(agent["cwd"]))
+    # The worktree is the innermost registered checkout holding the cwd, so a session working in a
+    # subfolder still records the tree cleanup may remove.
+    containing = [root for root in roots if Path(cwd).is_relative_to(os.path.normcase(os.path.realpath(root)))]
+    if not containing:
+        raise StartError("agent cwd is outside this repository and its registered worktrees")
+    worktree = max(containing, key=lambda root: len(os.path.realpath(root)))
+    path = transcript.find_transcript(session, Path(getattr(ops, "projects_root", PROJECTS_ROOT)))
+    if path is None:
+        raise StartError("agent transcript cannot be found")
+    try:
+        # The parser's boundary, not the file size: a record still being written is read whole later.
+        _, offset = transcript.read_records(path)
+    except OSError as exc:
+        raise StartError(f"cannot read agent transcript: {exc}") from exc
+    now = time.time()
+    worker_id = f"{os.path.normcase(repo)}@{agent['name']}"
+    worker = {
+        "worker_id": worker_id, "adhoc": True, "issue": None, "repo_path": repo, "lane": lane,
+        "label_tag": lanes.coordinator_tag(tag, lane, repo),
+        "title": label if label is not None else agent.get("terminal_title_stripped") or agent["name"],
+        "agent_name": agent["name"], "pane_id": agent["pane_id"], "workspace_id": agent["workspace_id"],
+        "session_id": session, "transcript_path": str(path), "transcript_offset": offset,
+        "adopted_session_id": session, "adopted_offset": offset,
+        "adopted_working": agent.get("agent_status") == "working",
+        "worktree_path": worktree, "phase": "mode_checked",
+        "state": "running" if agent.get("agent_status") == "working" else "awaiting_merge",
+        "state_token": uuid.uuid4().hex, "last_change": now, "last_growth_at": now,
+    }
+
+    def register(doc, events):
+        if any(binding.get("pane_id") == worker["pane_id"]
+               or (binding.get("controller") or {}).get("value") == session
+               for binding in doc["tab_bindings"].values()):
+            raise StartError("cannot adopt a lane's bound controller pane")
+        for current in [*doc["workers"].values(), *doc["queue"]]:
+            if current.get("state") != "cleaned" and any(
+                    current.get(key) == worker[key] for key in ("agent_name", "pane_id", "session_id")):
+                raise StartError("a non-cleaned worker already tracks this agent, pane or session")
+        doc["workers"][worker_id] = worker
+        events.append(("worker_adopted", dict(worker)))
+
+    registry.update_with_events(register, caller_lane=lane)
+    return worker
 
 
 def _interrupted_summary(repo, issue, exc):
@@ -554,7 +593,7 @@ def _interrupted_summary(repo, issue, exc):
     return summary
 
 
-def _start_issue(repo, issue, summaries, ops, *, lane="main", tag=None):
+def _start_issue(repo, issue, summaries, ops, *, lane="main", tag=None, contact=None):
     try:
         number = int(str(issue).lstrip("#"))
         if number <= 0:
@@ -580,6 +619,7 @@ def _start_issue(repo, issue, summaries, ops, *, lane="main", tag=None):
         candidate = {
             "worker_id": worker_id, "issue": number, "repo_path": repo, "lane": lane,
             "title": data.get("title", ""), "label_tag": tag, "entry_command": command,
+            "coordinator_contact": contact,
             "entry_args": args or f"#{number}", "phase": None,
             "branch": f"issue/{number}",
             "worktree_path": str(Path(repo).with_name(f"{Path(repo).name}-wt-issue-{number}")),
@@ -602,7 +642,11 @@ def start_next_queued(*, ops=adapters, keepalive=None) -> dict | None:
     def take(doc, events):
         if doc["holds"] or not _has_slot(doc) or not doc["queue"]:
             return
-        worker = doc["queue"].pop(0)
+        worker = next((item for item in doc["queue"]
+                       if not item.get("adhoc") and item.get("issue") is not None), None)
+        if worker is None:
+            return
+        doc["queue"].remove(worker)
         _claim(doc, worker, owner)
         admitted.append(worker)
         events.append(("worker_starting", worker))
@@ -623,8 +667,9 @@ def restart(name, *, lane="main", ops=adapters) -> dict:
 
     def claim(doc):
         matches = [worker for worker in doc["workers"].values()
-                   if worker.get("agent_name") == str(name)
-                   or str(worker.get("issue")) == str(name).lstrip("#")]
+                   if not worker.get("adhoc") and worker.get("issue") is not None
+                   and (worker.get("agent_name") == str(name)
+                        or str(worker["issue"]) == str(name).lstrip("#"))]
         if len(matches) != 1:
             raise ValueError(f"expected one worker matching {name}, found {len(matches)}")
         worker = matches[0]
@@ -638,7 +683,7 @@ def restart(name, *, lane="main", ops=adapters) -> dict:
             pass
         elif worker.get("state") == "start_failed" and _entry_retryable(doc, worker):
             resend.append(True)
-        elif worker.get("state") != "start_interrupted":
+        elif worker.get("state") not in {"start_interrupted", "storage_pending"}:
             raise ValueError("restart requires a start_interrupted worker, or a start_failed one "
                              "before agent start or whose entry never reached its session")
         if not _has_slot(doc):

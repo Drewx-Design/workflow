@@ -41,6 +41,9 @@ def worker_named(name, doc=None):
     doc = registry.load() if doc is None else doc
     matches = [w for key, w in doc["workers"].items()
                if name in (key, w.get("agent_name"))]
+    live_matches = [worker for worker in matches if worker.get("state") != "cleaned"]
+    if live_matches:
+        matches = live_matches
     if len(matches) != 1:
         raise ActionError(f"Expected one registered worker named {name!r}")
     return matches[0]
@@ -52,7 +55,7 @@ def projects_root(ops):
 
 def records_for(worker, ops):
     path = transcript.find_transcript(worker.get("session_id"), projects_root(ops))
-    return transcript.read_records(path)[0] if path else []
+    return transcript.read_records(path, transcript.worker_start_offset(worker))[0] if path else []
 
 
 def change_worker(worker_id, state, *, now=None, expected=None, expected_token=None, **fields):
@@ -440,7 +443,7 @@ def _prepare(worker, kind, text, action_id, records, *, transport="prompt", rese
                 or current.get("state_token") != worker.get("state_token")
                 or current.get("session_id") != worker.get("session_id")):
             raise ActionError("Worker state changed before the action was recorded")
-        if reserve and not start._has_slot(doc):
+        if reserve and not current.get("adhoc") and not start._has_slot(doc):
             if kind == "relay":
                 if current["state"] != "relay_pending":
                     current.update(state="relay_pending", last_change=time.time())
@@ -656,10 +659,20 @@ def resume(name, *, ops=adapters, action_id=None, lane=None):
     if not _prepare(worker, "resume", RESUME_TEXT, action_id, records_for(worker, ops), reserve=True, lane=lane):
         return reconcile_action(action_id, ops=ops, lane=lane)
     try:
-        config = registry.load()["config"]
+        doc = registry.load()
+        worker = doc["workers"][worker["worker_id"]]
+        config = doc["config"]
+        # The lane's one recorded contact now, never the name stored at start: that coordinator may
+        # have moved to another lane, or been renamed (it records the new name with `lane contact`).
+        # Without exactly one, the note accepts no session messages.
+        lane_contacts = {binding["contact"] for binding in doc["tab_bindings"].values()
+                         if binding.get("lane") == worker.get("lane", "main") and binding.get("contact")}
+        contact = next(iter(lane_contacts)) if len(lane_contacts) == 1 else None
         _step(action_id, ops, "agent", "start", worker["agent_name"], "--kind", "claude",
               "--pane", worker["pane_id"], "--", "--resume", worker["session_id"],
-              "--model", start.AGENT_MODEL, "--permission-mode", config.get("permission_mode", start.DEFAULT_PERMISSION_MODE))
+              "--model", start.AGENT_MODEL, "--permission-mode", config.get("permission_mode", start.DEFAULT_PERMISSION_MODE),
+              "--append-system-prompt", lanes.worker_note(
+                  worker.get("lane", "main"), worker.get("label_tag"), contact))
         deadline = time.monotonic() + start.SESSION_TIMEOUT
         while True:
             agent = agent_info(worker, ops)
@@ -801,14 +814,15 @@ def relay(name, text, *, state_token, ops=adapters, action_id=None, dismiss_form
             current.update(reopened_at=float(int(time.time()) - 1), reopen_action_id=action_id)
         current["relay_request"] = {"action_id": action_id, "text": text, "state_token": current.get("state_token")}
         # question and waiting_background workers already hold their slot.
-        if current["state"] not in {"question", "waiting_background"} and not start._has_slot(doc):
+        if (not current.get("adhoc") and current["state"] not in {"question", "waiting_background"}
+                and not start._has_slot(doc)):
             if current["state"] != "relay_pending":
                 current.update(state="relay_pending", last_change=time.time())
                 events.append(("worker_state", dict(current)))
 
     doc = registry.update_with_events(remember)
     worker = doc["workers"][worker["worker_id"]]
-    if worker["state"] == "relay_pending" and not start._has_slot(doc):
+    if worker["state"] == "relay_pending" and not worker.get("adhoc") and not start._has_slot(doc):
         return {"id": action_id, "state": "relay_pending", "text": text}
     return _send(worker, "relay", text, ops=ops, action_id=action_id,
                  reserve=worker["state"] not in {"question", "waiting_background"},
@@ -887,6 +901,7 @@ def handoff(name, target, *, lane="main", ops=adapters):
         _handoff_ready(doc, current)
         current["lane"] = target
         current["label_tag"] = target_tag
+        current["coordinator_contact"] = target_details.get("target_contact")
         current.pop("handoff_claim")
         events.append(("worker_handoff", {**current, "from_lane": lane, "to_lane": target}))
 

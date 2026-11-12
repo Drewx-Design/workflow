@@ -51,6 +51,9 @@ def main(argv=None):
     command.add_argument("issues", type=_issue_number, nargs="+")
     command = commands.add_parser("restart", help="restart an interrupted start from its next phase")
     command.add_argument("name", help="agent name or issue number")
+    command = commands.add_parser("adopt", help="track an existing Claude session without an issue")
+    command.add_argument("name", help="agent name or pane id")
+    command.add_argument("--label", help="title for the adopted worker")
     commands.add_parser("launch-watcher", help="launch the detached watcher")
     commands.add_parser("watch-run", help="run the watcher with its lifetime lock")
     command = commands.add_parser("follow", help="follow unacknowledged events")
@@ -110,8 +113,8 @@ def main(argv=None):
         if getattr(args, "legacy", False):
             if getattr(args, "repo_override", None) is not None:
                 raise ValueError("--legacy cannot be combined with --repo")
-            if args.command == "start":
-                raise ValueError("start cannot run with --legacy; no new legacy work is allowed")
+            if args.command in {"start", "adopt"}:
+                raise ValueError(f"{args.command} cannot run with --legacy; no new legacy work is allowed")
             if args.command == "handoff":
                 raise ValueError("handoff cannot run with --legacy; legacy workers stay in the main lane")
             if not os.environ.get("HERDR_COORD_HOME"):
@@ -175,8 +178,9 @@ def main(argv=None):
                                   "reason": "no watcher is running and none could be launched"}))
             return 1
     try:
+        binding = registry.load()["tab_bindings"].get(args.lane_context.get("tab_id"), {})
         summaries = start.start_issues(args.repo, args.issues, lane=args.lane,
-                                       tag=args.lane_context.get("tab_label"))
+                                       tag=args.lane_context.get("tab_label"), contact=binding.get("contact"))
     except Exception as exc:
         summaries = getattr(exc, "start_summaries", None) or [
             {"issue": issue, "state": "start_failed", "reason": str(exc)}
@@ -548,7 +552,12 @@ def _coordinator_command(args):
                 print("ownership: unknown (herdr snapshot unavailable)")
             probe_deadline = time.monotonic() + STATUS_PROBE_BUDGET
             for worker in [*doc["workers"].values(), *doc["queue"]]:
-                line = f"#{worker['issue']}\t{worker.get('agent_name') or '-'}\t{worker['state']}\tPR={worker.get('pr') or '-'}\tlast_change={worker.get('last_change', '-')}"
+                identity = "adhoc" if worker.get("issue") is None else f"#{worker['issue']}"
+                # An adopted session waiting for its next turn is recorded as awaiting_merge; it has no PR.
+                shown = "idle" if worker.get("adhoc") and worker["state"] == "awaiting_merge" else worker["state"]
+                line = f"{identity}\t{worker.get('agent_name') or '-'}\t{shown}\tPR={worker.get('pr') or '-'}\tlast_change={worker.get('last_change', '-')}"
+                if worker.get("adhoc"):
+                    line += f"\t{worker.get('title', '')}"
                 if worker["state"] == "start_failed" and worker.get("agent_name"):
                     line += "\t" + _start_failed_session(worker, deadline=probe_deadline)
                 line += f"\tlane={worker.get('lane', 'main')}"
@@ -639,6 +648,18 @@ def _coordinator_command(args):
             if watcher is not None:
                 print(json.dumps({"watcher": watcher}, ensure_ascii=False))
             result = start.restart(args.name, lane=args.lane)
+        elif args.command == "adopt":
+            repo = (getattr(args, "resolved_repo", None) or os.environ.get("HERDR_COORD_REPO")
+                    or getattr(args, "repo_override", None) or Path.cwd())
+            result = start.adopt(repo, args.name, label=args.label, lane=args.lane,
+                                 tag=args.lane_context.get("tab_label"),
+                                 caller_pane_id=args.lane_context.get("pane_id"))
+            try:
+                watcher = _ensure_watcher(hold=True)
+            except (OSError, TimeoutError) as exc:
+                watcher = {"state": "launch_failed", "detail": str(exc)}
+            if watcher is not None:
+                result = {**result, "watcher": watcher}
         elif args.command == "cleanup":
             result = _cleanup(args.abandon, merged_pr=args.merged_pr, lane=args.lane)
         elif args.command == "handoff":
@@ -649,7 +670,8 @@ def _coordinator_command(args):
         else:
             result = getattr(actions, args.command)(args.name, action_id=args.action_id, lane=args.lane)
         print(json.dumps(result, ensure_ascii=False))
-        return 1 if result.get("state") == "launch_failed" else 0
+        return 1 if (result.get("state") == "launch_failed"
+                     or result.get("watcher", {}).get("state") == "launch_failed") else 0
     except (actions.ActionError, start.StartError, ValueError) as exc:
         print(json.dumps({"state": "refused", "detail": str(exc)}, ensure_ascii=False))
         return 1
@@ -681,7 +703,7 @@ def _start_failed_session(worker, ops=None, *, deadline=None):
 
 def _cleanup(abandon=None, *, merged_pr=None, lane="main", ops=None):
     """Clean eligible workers; finish.cleanup refuses unless merged (or abandoned) and either
-    exited or idle with a clean worktree. A bare cleanup sweeps this lane's eligible workers; one that
+    exited or idle. A bare cleanup finishes this lane's eligible workers; one that
     names a worker (--abandon or --merged-pr) cleans only that worker, so a worker parked on
     purpose is never swept up with it (live, 2026-10-20)."""
     import adapters
@@ -696,14 +718,21 @@ def _cleanup(abandon=None, *, merged_pr=None, lane="main", ops=None):
     if only:
         workers = registry.load()["workers"].values()
         matches = [w for w in workers if w.get("agent_name") == str(only)]
+        # An adopted agent name may have belonged to a cleaned issue worker.
+        live_matches = [w for w in matches if w.get("state") != "cleaned"]
+        if live_matches:
+            matches = live_matches
         if not matches:
-            matches = [w for w in workers if str(w.get("issue")) == str(only).removeprefix("#")]
+            matches = [w for w in workers if w.get("issue") is not None
+                       and str(w["issue"]) == str(only).removeprefix("#")]
         if not matches:
             raise ValueError(f"no worker named {only}")
         if len(matches) != 1:
             raise ValueError(f"expected one worker matching {only}, found {len(matches)}")
         named_worker = matches[0]
         lanes.check_worker_lane(named_worker, lane)
+        if merged_pr and named_worker.get("adhoc"):
+            raise ValueError("adhoc workers have no merged PR proof; use cleanup --abandon")
     number = None
     if merged_pr:
         name, number = merged_pr
@@ -720,6 +749,8 @@ def _cleanup(abandon=None, *, merged_pr=None, lane="main", ops=None):
     results = []
     workers = [named_worker] if only else registry.load()["workers"].values()
     for worker in workers:
+        if only is None and worker.get("adhoc"):
+            continue
         if only is None and worker.get("lane", "main") != lane:
             continue
         if worker.get("state") == "cleaned":
@@ -750,8 +781,6 @@ def _cleanup(abandon=None, *, merged_pr=None, lane="main", ops=None):
                   "state": worker["state"], "state_token": worker.get("state_token")}
         outcome = finish.cleanup(worker, ops=ops)
         _release_cleanup_claim(worker["worker_id"], claim, cleaned=bool(outcome.get("cleaned")))
-        if outcome.get("cleaned"):
-            registry.append_event("worker_cleaned", {"worker_id": worker["worker_id"], "issue": worker.get("issue")})
         results.append({"issue": worker.get("issue"), **outcome})
     return {"state": "cleanup", "results": results}
 
@@ -792,17 +821,18 @@ def _claim_for_cleanup(worker, *, takeover=False, lane=None, abandon=False, merg
 
 def _release_cleanup_claim(worker_id, claim, *, cleaned):
     """Finish this claim: `cleaned`, or back to the claimed-from state when cleanup refused."""
-    def release(doc):
+    def release(doc, events):
         current = doc["workers"][worker_id]
         if current.get("state") != "cleaning" or current.get("state_token") != claim:
             return  # someone else holds the worker now
         claimed_from = current.pop("cleanup_from", {})
         if cleaned:
             current.update(state="cleaned", last_change=time.time())
+            events.append(("worker_cleaned", {"worker_id": worker_id, "issue": current.get("issue")}))
         else:
             current.update(state=claimed_from.get("state"), state_token=claimed_from.get("state_token"))
 
-    registry.update(release)
+    registry.update_with_events(release)
 
 
 if __name__ == "__main__":

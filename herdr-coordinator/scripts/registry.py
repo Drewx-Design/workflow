@@ -83,6 +83,11 @@ def _migrate(doc):
             doc["lanes"].setdefault(binding["lane"], _lane(doc["event_seq"]))["bound_before"] = True
         doc["tab_bindings"] = {}
         doc["version"] = 3
+    # Old registries may still carry bindings to the retired storage manager.
+    # Keep worker identity and lifecycle fields; no binding is needed to finish.
+    for worker in [*doc["workers"].values(), *doc["queue"]]:
+        for key in ("storage", "storage_release", "storage_next_action"):
+            worker.pop(key, None)
     return doc
 
 
@@ -310,13 +315,14 @@ ACTIONABLE_EVENT_KINDS = frozenset({
     "worker_state", "worker_start_failed", "checks_overdue", "worker_handoff",
     "lane_unattended", "herdr_lost", "watcher_lost", "watcher_exit", "watcher_hung",
     "technical_problem", "delivery_unknown", "send_refused", "delivery_failed", "action_superseded",
+    "worker_storage", "worker_storage_pending",
 })
 
 # These known kinds are always bookkeeping; unknown kinds must never be auto-acked.
 BOOKKEEPING_EVENT_KINDS = frozenset({
     "worker_starting", "worker_phase", "session_discovered", "entry_action_recorded",
     "action_delivered", "session_changed", "watcher_slow", "holds_cleared", "issue_refused",
-    "worker_cleaned",
+    "worker_cleaned", "worker_adopted", "worker_launch_intent",
 })
 
 
@@ -334,6 +340,8 @@ def event_actionable(event) -> bool:
         return not payload.get("failed_iterations")
     if kind == "action_superseded":
         return payload.get("kind") == "relay"
+    if kind == "worker_storage":
+        return bool(payload.get("reason"))
     return kind in ACTIONABLE_EVENT_KINDS
 
 

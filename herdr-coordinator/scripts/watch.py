@@ -30,6 +30,7 @@ class _TranscriptCache(NamedTuple):
     path: str
     records: list[dict]
     offset: int
+    start_offset: int
 
 
 # Rebuilt once after watcher restart, then extended from the persisted byte offset.
@@ -297,19 +298,22 @@ def _read(worker, ops, now):
     key = (str(registry._home()), worker["worker_id"])
     cached = _TRANSCRIPTS.get(key)
     offset = worker.get("transcript_offset", 0)
-    if cached is None or cached.path != str(path) or cached.offset != offset:
-        records, new_offset = transcript.read_records(path)
+    start_offset = transcript.worker_start_offset(worker)
+    initial_args = (path, start_offset) if start_offset else (path,)
+    if (cached is None or cached.path != str(path) or cached.offset != offset
+            or cached.start_offset != start_offset):
+        records, new_offset = transcript.read_records(*initial_args)
     else:
         size = path.stat().st_size
         if size < offset:
-            records, new_offset = transcript.read_records(path)
+            records, new_offset = transcript.read_records(*initial_args)
         else:
             records, new_offset = cached.records, offset
             if size != offset:
                 new_records, new_offset = transcript.read_records(path, offset)
                 records.extend(new_records)
     growth = new_offset != offset
-    _TRANSCRIPTS[key] = _TranscriptCache(str(path), records, new_offset)
+    _TRANSCRIPTS[key] = _TranscriptCache(str(path), records, new_offset, start_offset)
     # Record a move on to build as soon as it is seen, with the offset that covers it: a later session
     # change drops these records. The scan is cheap (about 2 ms for 3,000 records).
     entry = _entry(worker)
@@ -379,6 +383,14 @@ def _notification(event, worker=None) -> tuple[str, str] | None:
         title, body = "Worker send refused (nothing sent)", payload["detail"]
     elif event["kind"] == "delivery_failed":
         title, body = "Worker delivery failed", payload["detail"]
+    elif (event["kind"] == "worker_storage_pending"
+          or event["kind"] == "worker_storage" and registry.event_actionable(event)):
+        title = "Worker storage held"
+        name = payload.get("agent_name") or (worker or {}).get("agent_name") or payload.get("worker_id", "?")
+        body = f"Worker {name}: {payload.get('reason') or 'storage unavailable'}"
+        next_action = payload.get("storage_next_action") or payload.get("nextAction")
+        if next_action:
+            body += f"\nNext action: {next_action}"
     elif event["kind"] == "action_superseded" and payload.get("kind") == "relay":
         title = "Worker answer superseded"
         body = (f"Worker {payload.get('agent_name') or payload['worker_id']}: answer {payload['text']!r} "
@@ -522,7 +534,7 @@ def _verify(worker, records, ops, now, *, no_closing_record=False):
     )
     if no_closing_record:
         records = _latest_turn(records)
-    verify = getattr(ops, "verify_done", finish.verify_done)
+    verify = finish.verify_done if worker.get("adhoc") else getattr(ops, "verify_done", finish.verify_done)
     if verify is None:
         verify = finish.verify_done
     result = verify(worker, ops=ops, config=registry.load()["config"], now=now, records=records)
@@ -727,19 +739,20 @@ def _reopen_if_in_use(worker, ops, now):
 def _poll_worker(worker, ops, now, keepalive=None):
     if worker["state"] == "start_failed":
         worker = _reconcile_entry(worker, ops, now)
-    if worker["state"] in TERMINAL_STATES:
+    adhoc_settled = worker.get("adhoc") and worker["state"] == "ended_without_proof"
+    if worker["state"] in TERMINAL_STATES or adhoc_settled:
         # Other action receipts can still reconcile from the recorded transcript.
         if worker.get("pending_action_id"):
-            if worker["state"] in REOPENABLE_STATES and worker.get("session_id"):
+            if (worker["state"] in REOPENABLE_STATES or adhoc_settled) and worker.get("session_id"):
                 _settled_offset(worker)  # anchor before this read moves the offset
             records, _ = _read(worker, ops, now)
             pending = actions.reconcile_action(worker["pending_action_id"], ops=ops, records=records)
             if pending["status"] == "delivery_unknown":
                 actions.settle_moot_nudge(worker["pending_action_id"], records)
-        if worker["state"] in REOPENABLE_STATES and worker.get("session_id"):
+        if (worker["state"] in REOPENABLE_STATES or adhoc_settled) and worker.get("session_id"):
             _reopen_if_in_use(registry.load()["workers"][worker["worker_id"]], ops, now)
         return
-    if worker["state"] == "start_interrupted":
+    if worker["state"] in {"start_interrupted", "storage_pending"}:
         return  # Only an explicit restart may claim this start.
     if worker["state"] == "starting" and not worker.get("pending_action_id"):
         _continue_start(worker, ops, now, keepalive)
@@ -816,6 +829,8 @@ def _poll_worker(worker, ops, now, keepalive=None):
         last_growth_at=worker.get("last_growth_at", now),
         stall_after_seconds=registry.load()["config"].get("stall_after_seconds", 1200),
         expired_background=frozenset(worker.get("expired_background", ())),
+        turn_in_progress=bool(worker.get("adhoc") and worker.get("adopted_working")
+                              and worker.get("adopted_session_id") == worker.get("session_id")),
     )
     if observed.state == "unknown":
         return
@@ -864,10 +879,14 @@ def _poll_worker(worker, ops, now, keepalive=None):
         action_id = f"quota:{worker['worker_id']}:{worker.get('session_id')}:{index}"
         actions.change_worker(worker["worker_id"], "quota_wait", now=now, expected=state,
                               resets_at=observed.resets_at, quota_action_id=action_id)
-        if (not delivery_unknown and observed.resets_at is not None
+        if (not worker.get("adhoc") and not delivery_unknown and observed.resets_at is not None
                 and now >= observed.resets_at and not registry.load()["holds"]):
             actions.resume(worker["worker_id"], ops=ops, action_id=action_id)
     elif observed.state == "stalled":
+        if worker.get("adhoc"):
+            actions.change_worker(worker["worker_id"], "stalled", now=now, expected=state,
+                                  detail="Adhoc worker stalled; awaiting explicit input")
+            return
         if registry.load()["holds"] or state == "ended_without_proof":
             return
         if state == "question":
@@ -904,7 +923,7 @@ def _drain(ops, keepalive=None):
     for worker in list(registry.load()["workers"].values()):
         if worker["state"] != "relay_pending":
             continue
-        if registry.load()["holds"] or not start._has_slot(registry.load()):
+        if registry.load()["holds"] or (not worker.get("adhoc") and not start._has_slot(registry.load())):
             return
         pending = registry.load()["actions"].get(worker.get("pending_action_id"), {})
         if pending.get("status") == "delivery_unknown":
@@ -1070,6 +1089,10 @@ def _compact_line(event, *, lane="main"):
     for key in ("issue", "state", "agent_name", "worker_id", "state_token", "url", "pr", "no_ci", "overdue"):
         if key in payload:
             summary[key] = payload[key]
+    if event["kind"] in {"worker_storage", "worker_storage_pending"}:
+        for key in ("reason", "storage_next_action", "nextAction"):
+            if key in payload:
+                summary[key] = payload[key]
     if event["kind"] == "worker_handoff":
         summary.update(from_lane=payload["from_lane"], to_lane=payload["to_lane"], detail=True)
     elif event["kind"] == "lane_unattended":
@@ -1189,7 +1212,12 @@ def follow(*, interval=5, compact=False, quiet=False, wake=False, lane="main", c
                                               and 0 <= now - current.get("woken_at", 0) < WAKE_SUPPRESS_SECONDS
                                               else 0)
                         for index, event in enumerate(events):
-                            if event["kind"] not in known_kinds or registry.event_actionable(event):
+                            # Another lane's unattended alert is for its own coordinator (and the user's
+                            # pop-up); here it is bookkeeping (observed 2026-10-26).
+                            other_lane = (event["kind"] == "lane_unattended"
+                                          and event.get("payload", {}).get("lane") != lane)
+                            if not other_lane and (event["kind"] not in known_kinds
+                                                   or registry.event_actionable(event)):
                                 leading = False
                                 if event["seq"] > suppressed_through:
                                     wake_indexes.append(index)

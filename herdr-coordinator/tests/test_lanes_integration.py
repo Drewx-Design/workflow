@@ -70,7 +70,11 @@ def session_path(worker):
 if kind == "gh" and args[:2] == ["issue", "view"]:
     issue = int(args[2])
     reply({"number": issue, "title": f"Issue {issue}", "labels": [{"name": "ce:work"}], "body": ""})
-if kind == "git" and args == ["fetch", "origin"]:
+if kind == "git" and args[:3] == ["worktree", "add", "-b"]:
+    assert len(args) == 5
+    path = Path(args[4])
+    assert path.is_relative_to(root), path
+    path.mkdir()
     reply({})
 if kind != "herdr":
     raise AssertionError(f"unexpected fake command: {kind} {args}")
@@ -121,25 +125,28 @@ if args == ["workspace", "list"]:
 if args[:2] == ["workspace", "rename"]:
     label_path(args[2]).write_text(json.dumps(args[3]), encoding="utf-8")
     reply({"result": {}})
-if args[:2] == ["worktree", "create"]:
+if args[:2] == ["worktree", "open"]:
     doc = registry.load()
     assert sum(worker["state"] in {"starting", "running"} for worker in doc["workers"].values()) <= doc["config"]["cap"]
     path = Path(args[args.index("--path") + 1])
     assert path.is_relative_to(root), path
-    path.mkdir()
+    assert path.is_dir()
     worker = next(worker for worker in doc["workers"].values() if worker.get("worktree_path") == str(path))
     workspace_id = f"workspace-{worker['issue']}"
     label_path(workspace_id).write_text(json.dumps(args[args.index("--label") + 1]), encoding="utf-8")
     reply({"result": {"workspace": {"workspace_id": workspace_id, "worktree": {"checkout_path": str(path)}},
+                      "tab": {"tab_id": f"tab-{worker['issue']}"},
                       "root_pane": {"pane_id": f"pane-{worker['issue']}"}}})
-if args[:2] in (["workspace", "close"], ["worktree", "remove"], ["agent", "start"]):
+if args[:2] == ["pane", "process-info"]:
+    reply({"result": {"process_info": {"pane_id": args[2], "foreground_processes": [{"name": "claude.exe", "pid": data["worker_pid"]}]}}})
+if args[:2] in (["workspace", "close"], ["agent", "start"]):
     reply({"result": {}})
 if args[:2] == ["agent", "get"]:
     worker = worker_named(args[2])
     if worker.get("abandoned") and worker["state"] == "cleaning":
         error("agent_not_found")
     response = copy.deepcopy(data["agent"])
-    response["result"]["agent"].update(workspace_id=worker["workspace_id"], pane_id=worker["pane_id"],
+    response["result"]["agent"].update(name=args[2], cwd=worker["worktree_path"], workspace_id=worker["workspace_id"], pane_id=worker["pane_id"],
                                        agent_session={"value": f"session-{worker['issue']}"})
     reply(response)
 if args[:2] == ["agent", "prompt"]:
@@ -161,6 +168,27 @@ if args[:2] == ["agent", "prompt"]:
             handle.write(json.dumps(entry) + "\\n")
     reply({"result": {}})
 raise AssertionError(f"unexpected fake herdr command: {args}")
+'''
+BOOTSTRAP = '''import json
+import os
+from pathlib import Path
+import runpy
+import sys
+responses, scripts, cli, *arguments = sys.argv[1:]
+sys.path.insert(0, scripts)
+import adapters
+data = json.loads(Path(responses).read_text(encoding="utf-8"))
+root = Path(data["root"])
+assert Path(os.environ["LOCALAPPDATA"]) == root / "local"
+prefix = [sys.executable, data["fake"], responses, scripts]
+original_run = adapters.run
+def run(argv, **kwargs):
+    if argv[:len(prefix)] == prefix and argv[len(prefix)] in {"herdr", "git", "gh"}:
+        return original_run(argv, **kwargs)
+    raise AssertionError(f"unrecognized external operation: {argv}")
+adapters.run = run
+sys.argv = [cli, *arguments]
+runpy.run_path(cli, run_name="__main__")
 '''
 OLD_UPDATE = '''import json
 import os
@@ -194,11 +222,14 @@ class LanesIntegrationTests(unittest.TestCase):
         self.profile.mkdir()
         self.fake = self.root / "fake herdr.py"
         self.fake.write_text(FAKE, encoding="utf-8")
+        self.bootstrap = self.root / "fixture cli.py"
+        self.bootstrap.write_text(BOOTSTRAP, encoding="utf-8")
         self.responses = self.root / "responses.json"
         records = [json.loads(line) for line in
                    (FIXTURES / "session-probe-full.jsonl").read_text(encoding="utf-8").splitlines()]
         self.data = {
             "root": str(self.root), "projects": str(self.profile / ".claude" / "projects"),
+            "fake": str(self.fake), "worker_pid": os.getpid(),
             "workspace": json.loads((FIXTURES / "herdr-workspace-get-main.json").read_text(encoding="utf-8")),
             "listing": json.loads((FIXTURES / "herdr-workspace-list.json").read_text(encoding="utf-8")),
             **{entity: json.loads((FIXTURES / f"herdr-{entity}-get.json").read_text(encoding="utf-8"))
@@ -218,6 +249,7 @@ class LanesIntegrationTests(unittest.TestCase):
         self.env.update({
             "HERDR_COORD_HOME": str(self.home), "HERDR_COORD_REPO": str(self.repo),
             "USERPROFILE": str(self.profile), "PYTHONUNBUFFERED": "1",
+            "LOCALAPPDATA": str(self.root / "local"),
             **{f"HERDR_COORD_{name.upper()}": json.dumps(prefix + [name]) for name in ("herdr", "git", "gh")},
         })
         for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
@@ -245,6 +277,8 @@ class LanesIntegrationTests(unittest.TestCase):
         return caller
 
     def spawn(self, argv, *, lane=None, caller=None, barrier=None, timeout=25):
+        if argv[:2] == [sys.executable, str(CLI)]:
+            argv = [sys.executable, str(self.bootstrap), str(self.responses), str(SCRIPTS), *argv[1:]]
         env = self.env.copy()
         if lane is not None:
             env["HERDR_WORKSPACE_ID"] = f"w-{lane}"
@@ -534,7 +568,8 @@ class LanesIntegrationTests(unittest.TestCase):
         self.assertIn(worker["lane"], refusal["reason"])
         self.assertEqual(len(registry.load()["workers"]), 1)
         calls = [json.loads(path.read_text(encoding="utf-8")) for path in self.root.glob("call-*.json")]
-        self.assertEqual(sum(call[:3] == ["herdr", "worktree", "create"] for call in calls), 1)
+        self.assertEqual(sum(call[:3] == ["git", "worktree", "add"] for call in calls), 1)
+        self.assertEqual(sum(call[:3] == ["herdr", "worktree", "open"] for call in calls), 1)
 
     def test_relays_handoff_and_bare_cleanup_follow_lane_ownership(self):
         self.bind_lanes()

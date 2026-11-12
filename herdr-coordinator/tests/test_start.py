@@ -12,10 +12,12 @@ import re
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import adapters
 import herdr_coord
+import lanes
 import registry
 import start
 
@@ -104,32 +106,29 @@ class FakeOps:
         if args == ("status", "--porcelain"):
             return self.git_status
         if args[:2] == ("worktree", "add"):
-            Path(args[4]).mkdir()
+            path = Path(args[4])
+            if path.exists():
+                return failure("create-target-exists")
+            self.worktrees.append(path)
+            if self.delay_path:
+                self.pending_path = path
+            else:
+                path.mkdir()
         return success()
 
     def herdr(self, *args, **kwargs):
         self.calls.append(("herdr", args, kwargs))
         if args[:2] in {("tab", "get"), ("pane", "get"), ("tab", "list"), ("pane", "list")}:
             return herdr_identity(*args, **kwargs)
-        if args[:2] == ("worktree", "create"):
+        if args[:2] == ("pane", "process-info"):
+            return success({"result": {"process_info": {"pane_id": args[2], "foreground_processes": [{"name": "claude.exe", "pid": os.getpid()}]}}})
+        if args[:2] == ("worktree", "open"):
             if self.worktree_error:
                 return failure(self.worktree_error)
-            path = Path(args[args.index("--path") + 1])
-            self.worktrees.append(path)
-            if self.delay_path:
-                self.pending_path = path
-            else:
-                path.mkdir()
-            index = len(self.worktrees)
-            return success({"result": {
-                "workspace": {"workspace_id": f"workspace-{index}", "worktree": {"checkout_path": str(path)}},
-                "root_pane": {"pane_id": f"pane-{index}"},
-            }})
-        if args[:2] == ("workspace", "create"):
-            return success({"result": {
-                "workspace": {"workspace_id": "fallback-workspace"},
-                "root_pane": {"pane_id": "fallback-pane"},
-            }})
+            path = args[args.index("--path") + 1]
+            index = max(1, len(self.worktrees))
+            return success({"result": {"workspace": {"workspace_id": f"workspace-{index}", "worktree": {"checkout_path": path}},
+                            "tab": {"tab_id": f"tab-{index}"}, "root_pane": {"pane_id": f"pane-{index}"}}})
         if args == ("workspace", "list"):
             return success({"result": {"workspaces": self.workspaces}})
         if args[:2] == ("agent", "start"):
@@ -159,10 +158,14 @@ class FakeOps:
             self.write_transcript(args[2], args[3])
             return success()
         if args[:2] == ("agent", "get"):
+            if args[2] not in self.agents:
+                return failure("agent_not_found")
+            worker = next(w for w in registry.load()["workers"].values() if w.get("agent_name") == args[2])
             if self.session_polls:
                 self.session_polls -= 1
-                return success({"result": {"agent": {}}})
-            return success({"result": {"agent": {"agent_session": {"value": self.agents[args[2]]}}}})
+                return success({"result": {"agent": {"name": args[2], "cwd": worker["worktree_path"], "workspace_id": worker["workspace_id"], "pane_id": worker["pane_id"]}}})
+            return success({"result": {"agent": {"name": args[2], "cwd": worker["worktree_path"], "workspace_id": worker["workspace_id"], "pane_id": worker["pane_id"],
+                            "agent_session": {"value": self.agents[args[2]]}}}})
         if args[:2] == ("agent", "send-keys"):
             self.escapes.append(args)
             return success()
@@ -227,6 +230,16 @@ class StartTests(unittest.TestCase):
             patcher = mock.patch.object(start, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # Fake transports become ready synchronously or after a polling sleep.
+        # Registry fsync / host scheduling must not consume their 30ms test budget.
+        elapsed = 0.0
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+        clock = SimpleNamespace(time=start.time.time, monotonic=lambda: elapsed, sleep=advance)
+        patcher = mock.patch.object(start, "time", clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.ops = FakeOps(self.projects)
         identity = mock.patch.object(adapters, "herdr", side_effect=herdr_identity)
         identity.start()
@@ -240,82 +253,43 @@ class StartTests(unittest.TestCase):
         with mock.patch.object(start, "_run_worker", side_effect=lambda worker, ops: worker):
             return start.start_issues(self.repo, [number], ops=self.ops)[0]
 
-    def test_adopts_own_clean_unrecorded_worktree(self):
-        worker = self.unstarted_worker()
-        path = Path(worker["worktree_path"])
-        path.mkdir()
-        listed_path = str(path).swapcase().replace("\\", "/") if os.name == "nt" else str(path)
-        self.ops.git_list = adapters.CommandResult(True, 0,
-            f"worktree {self.repo}\nbranch refs/heads/main\n\n"
-            f"worktree {listed_path}\nHEAD abc\nbranch refs/heads/issue/1930\n\n", "")
-        self.ops.calls.clear()
-
-        adopted = start._create_worktree(worker, self.ops)
-
-        self.assertTrue(adopted["worktree_created"])
-        self.assertEqual(adopted["phase"], "worktree")
-        self.assertEqual(adopted["workspace_id"], "fallback-workspace")
-        self.assertEqual(adopted["pane_id"], "fallback-pane")
-        self.assertEqual(self.workers()[0], adopted)
-        self.assertEqual([(kind, args) for kind, args, _ in self.ops.calls], [
-            ("git", ("worktree", "list", "--porcelain")),
-            ("git", ("status", "--porcelain")),
-            ("herdr", ("workspace", "list")),
-            ("herdr", ("workspace", "create", "--cwd", str(path),
-                       "--label", "repo with spaces #1930 Issue 1930", "--no-focus")),
-        ])
-        self.assertEqual(self.ops.calls[0][2]["cwd"], str(self.repo))
-        self.assertEqual(self.ops.calls[1][2]["cwd"], str(path))
-
-    def test_existing_worktree_is_refused_unless_registered_on_own_branch_and_clean(self):
+    def test_unrecorded_existing_worktree_is_held_before_herdr_open(self):
         worker = self.unstarted_worker()
         path = Path(worker["worktree_path"])
         path.mkdir()
         marker = path / "keep.txt"
         marker.write_text("keep", encoding="utf-8")
-        own = f"worktree {path}\nbranch refs/heads/issue/1930\n\n"
-        cases = (
-            (f"worktree {path}\nbranch refs/heads/another\n\n"
-             f"worktree {self.root / 'other'}\nbranch refs/heads/issue/1930\n\n",
-             "", "not registered on branch issue/1930"),
-            (own, " M keep.txt\n", "uncommitted changes"),
-            (f"worktree {self.repo}\nbranch refs/heads/main\n\n", "", "not a registered worktree"),
-        )
-        for listing, status, reason in cases:
-            with self.subTest(reason=reason):
-                self.ops.git_list = adapters.CommandResult(True, 0, listing, "")
-                self.ops.git_status = adapters.CommandResult(True, 0, status, "")
-                self.ops.calls.clear()
-                before = registry.load()
-                with self.assertRaises(start.StartError) as error:
-                    start._create_worktree(worker, self.ops)
-                self.assertIn(str(path), str(error.exception))
-                self.assertIn(reason, str(error.exception))
-                self.assertEqual(registry.load(), before)
-                self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-                self.assertTrue(all(kind == "git" and args in {
-                    ("worktree", "list", "--porcelain"), ("status", "--porcelain"),
-                } for kind, args, _ in self.ops.calls))
-
-    def test_adoption_refuses_an_existing_workspace_on_the_path(self):
-        worker = self.unstarted_worker()
-        path = Path(worker["worktree_path"])
-        path.mkdir()
-        self.ops.git_list = adapters.CommandResult(True, 0,
-            f"worktree {path}\nbranch refs/heads/issue/1930\n\n", "")
-        checkout = str(path).swapcase().replace("\\", "/") if os.name == "nt" else str(path)
-        self.ops.workspaces = [{"workspace_id": "occupied-workspace", "worktree": {"checkout_path": checkout}}]
         self.ops.calls.clear()
-
-        with self.assertRaisesRegex(start.StartError, "occupied-workspace"):
+        with self.assertRaisesRegex(start.StartError, "create-target-exists"):
             start._create_worktree(worker, self.ops)
-
-        self.assertTrue(path.is_dir())
-        self.assertFalse(any(args[:2] in {("workspace", "create"), ("worktree", "create"), ("worktree", "remove")}
-                             for _, args, _ in self.ops.calls))
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
         self.assertIsNone(self.workers()[0]["phase"])
-        # Refused before adoption is recorded, so a later cleanup never treats this tree as the worker's.
-        self.assertFalse(self.workers()[0].get("worktree_created"))
+        self.assertEqual([(kind, args[:2]) for kind, args, _ in self.ops.calls], [("git", ("worktree", "add"))])
+
+    def test_recorded_creation_reuses_checkout_when_open_is_retried(self):
+        worker = self.unstarted_worker()
+        self.ops.worktree_error = "unknown_command"
+        with self.assertRaises(start.StartError):
+            start._create_worktree(worker, self.ops)
+        saved = self.workers()[0]
+        self.assertTrue(saved["worktree_created"])
+        self.ops.worktree_error = None
+        opened = start._create_worktree(saved, self.ops)
+        self.assertTrue(opened["worktree_created"])
+        self.assertEqual(opened["workspace_id"], "workspace-1")
+        self.assertEqual(sum(kind == "git" and args[:2] == ("worktree", "add") for kind, args, _ in self.ops.calls), 1)
+
+    def test_restart_hands_off_recorded_worker_after_crash_without_second_spawn(self):
+        worker = start._create_worktree(self.unstarted_worker(), self.ops)
+        worker = start._record(worker["worker_id"], "worker_launch_intent", agent_name="recorded-agent")
+        self.ops.agents["recorded-agent"] = "session-recovered"
+        registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(state="start_interrupted"))
+        self.ops.calls.clear()
+        restarted = start.restart("1930", ops=self.ops)
+        self.assertEqual(restarted["state"], "running", restarted)
+        self.assertEqual(restarted["agent_name"], "recorded-agent")
+        self.assertEqual(restarted["pane_id"], worker["pane_id"])
+        self.assertFalse(any(kind == "herdr" and args[:2] == ("agent", "start") for kind, args, _ in self.ops.calls))
 
     def test_absent_worktree_uses_existing_creation_path(self):
         worker = self.unstarted_worker()
@@ -328,7 +302,7 @@ class StartTests(unittest.TestCase):
         self.assertTrue(created["worktree_created"])
         self.assertEqual(created["workspace_id"], "workspace-1")
         self.assertEqual([(kind, args[:2]) for kind, args, _ in self.ops.calls], [
-            ("git", ("fetch", "origin")), ("herdr", ("worktree", "create")),
+            ("git", ("worktree", "add")), ("herdr", ("worktree", "open")),
         ])
 
     def test_restart_refuses_a_failed_agent_start_that_recorded_no_agent(self):
@@ -348,9 +322,9 @@ class StartTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 worker = self.unstarted_worker(number)
                 path = Path(worker["worktree_path"])
-                path.mkdir()
-                self.ops.git_list = adapters.CommandResult(True, 0,
-                    f"worktree {path}\nbranch refs/heads/issue/{number}\n\n", "")
+                self.ops.git("worktree", "add", "-b", worker["branch"], worker["worktree_path"])
+                registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(worktree_created=True))
+                worker = registry.load()["workers"][worker["worker_id"]]
                 if phase == "worktree":
                     worker = start._create_worktree(worker, self.ops)
                 registry.update(lambda doc: doc["workers"][worker["worker_id"]].update(
@@ -366,7 +340,7 @@ class StartTests(unittest.TestCase):
                 self.assertEqual((restarted["state"], restarted["phase"]), ("running", "mode_checked"))
                 self.assertNotIn("reason", restarted)
                 self.assertTrue(restarted["worktree_created"])
-                self.assertFalse(any(args[:2] == ("worktree", "create") for _, args, _ in self.ops.calls))
+                self.assertFalse(any(kind == "git" and args[:2] == ("worktree", "add") for kind, args, _ in self.ops.calls))
                 self.assertEqual(len(self.ops.agents), number - 1929)
                 self.assertEqual(len(self.ops.prompts), number - 1929)
 
@@ -472,6 +446,11 @@ class StartTests(unittest.TestCase):
         context = {"lane": "seo", "tab_id": "w1:t1", "pane_id": "w1:t1:p1", "workspace_id": "w1",
                    "controller": {"agent": "claude", "kind": "id", "value": "coordinator-session"},
                    "source": "tab label", "tab_label": "C3-data quality"}
+        binding = {"lane": "seo", "controller": context["controller"], "source": "tab label",
+                   "label_seen": context["tab_label"], "pane_id": context["pane_id"],
+                   "contact": "coord-a [abc123]"}
+        registry.update(lambda doc: doc["tab_bindings"].update({
+            "other-tab": {**binding, "contact": "other-lane [123456]"}, context["tab_id"]: binding}))
         for command, argv, expected in (
             ("start_issues", ["start", str(self.repo), "12"], (str(self.repo), [12])),
             ("restart", ["restart", "#12"], ("#12",)),
@@ -482,12 +461,26 @@ class StartTests(unittest.TestCase):
                     mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(herdr_coord.main(argv), 0)
             run.assert_called_once_with(*expected, lane="seo",
-                                        **({"tag": "C3-data quality"} if command == "start_issues" else {}))
+                                        **({"tag": "C3-data quality", "contact": "coord-a [abc123]"}
+                                           if command == "start_issues" else {}))
 
-    def test_start_stores_lane_and_labels_both_workspace_creation_paths(self):
+    def test_start_stores_contact_and_passes_worker_system_note(self):
+        self.ops.issue(12)
+        worker = start.start_issues(self.repo, [12], lane="seo", tag="C3-data quality",
+                                    contact="coord-a [abc123]", ops=self.ops)[0]
+        self.assertEqual(worker["state"], "running", worker)
+        self.assertEqual(worker["coordinator_contact"], "coord-a [abc123]")
+        self.assertEqual(self.workers()[0]["coordinator_contact"], "coord-a [abc123]")
+        args = next(args for kind, args, _ in self.ops.calls
+                    if kind == "herdr" and args[:2] == ("agent", "start"))
+        self.assertEqual(args[args.index("--") + 1:], (
+            "--model", "claude-opus-5-5", "--permission-mode", "auto", "--append-system-prompt",
+            lanes.worker_note("seo", "C3", "coord-a [abc123]")))
+        self.assertIn("lane seo, coordinated by C3 (messaging name: coord-a [abc123])", args[-1])
+
+    def test_start_stores_lane_and_labels_opened_workspace(self):
         for index, (lane, fallback, tab_label) in enumerate((
-            ("seo", False, None), ("main", False, None), ("seo", True, None), ("main", True, None),
-            ("seo", False, "C3-data quality"), ("seo", True, "C3-data quality"),
+            ("seo", False, None), ("main", False, None), ("seo", False, "C3-data quality"),
         )):
             with self.subTest(lane=lane, fallback=fallback, tab_label=tab_label), mock.patch.dict(os.environ, {
                     "HERDR_COORD_HOME": str(self.root / f"labels-{index}")}):
@@ -499,7 +492,7 @@ class StartTests(unittest.TestCase):
                 self.assertEqual(worker["state"], "running", worker)
                 self.assertEqual(worker["lane"], lane)
                 self.assertEqual(self.workers()[0]["lane"], lane)
-                command = ("workspace", "create") if fallback else ("worktree", "create")
+                command = ("worktree", "open")
                 workspace = next(args for kind, args, _ in reversed(self.ops.calls)
                                  if kind == "herdr" and args[:2] == command)
                 tag = "C3" if tab_label else ("boon-town" if lane == "main" else "seo")
@@ -510,7 +503,7 @@ class StartTests(unittest.TestCase):
                 self.assertTrue(all(event["lanes"] == [lane] for event in events))
 
     def test_start_and_restart_reuse_the_coordinator_tag_and_stored_title(self):
-        for fallback in (False, True):
+        for fallback in (False,):
             with self.subTest(fallback=fallback), mock.patch.dict(os.environ, {
                     "HERDR_COORD_HOME": str(self.root / f"tag-{fallback}")}):
                 repo = self.root / str(fallback) / "boon-town"
@@ -523,7 +516,7 @@ class StartTests(unittest.TestCase):
                 self.assertEqual(worker["label_tag"], "C3")
                 self.assertEqual(self.workers()[0]["label_tag"], "C3")
                 first = next(args for kind, args, _ in reversed(self.ops.calls)
-                             if kind == "herdr" and args[:2] == ("worktree", "create"))
+                             if kind == "herdr" and args[:2] == ("worktree", "open"))
                 expected = "C3 #12 faster issue filing with clearer"
                 self.assertEqual(first[first.index("--label") + 1], expected)
                 self.ops.issues[12]["title"] = "A changed issue title"
@@ -532,7 +525,7 @@ class StartTests(unittest.TestCase):
                 restarted = start.restart("12", lane="seo", ops=self.ops)
                 self.assertEqual(restarted["state"], "running", restarted)
                 self.assertEqual(restarted["label_tag"], "C3")
-                command = ("workspace", "create") if fallback else ("worktree", "create")
+                command = ("worktree", "open")
                 workspace = next(args for kind, args, _ in self.ops.calls
                                  if kind == "herdr" and args[:2] == command)
                 self.assertEqual(workspace[workspace.index("--label") + 1], expected)
@@ -543,7 +536,7 @@ class StartTests(unittest.TestCase):
         worker = registry.load()["workers"][worker["worker_id"]]
         start._create_worktree(worker, self.ops)
         workspace = next(args for kind, args, _ in self.ops.calls
-                         if kind == "herdr" and args[:2] == ("worktree", "create"))
+                         if kind == "herdr" and args[:2] == ("worktree", "open"))
         self.assertEqual(workspace[workspace.index("--label") + 1], "repo with spaces #12 Issue 12")
 
     def test_start_refuses_workers_and_queued_issues_owned_by_another_lane(self):
@@ -667,7 +660,7 @@ class StartTests(unittest.TestCase):
             self.ops.issue(number, [label])
         self.ops.session_polls = 2
         summaries = start.start_issues(self.repo, [1, 2, 3], ops=self.ops)
-        self.assertEqual([item["state"] for item in summaries], ["running"] * 3)
+        self.assertEqual([item["state"] for item in summaries], ["running"] * 3, summaries)
         workers = self.workers()
         self.assertEqual(len(workers), 3)
         self.assertEqual(len({worker["agent_name"] for worker in workers}), 3)
@@ -683,14 +676,19 @@ class StartTests(unittest.TestCase):
             self.assertEqual(worker["branch"], f"issue/{worker['issue']}")
             self.assertEqual(Path(worker["worktree_path"]), self.root / f"{self.repo.name}-wt-issue-{worker['issue']}")
             self.assertEqual(registry.load()["actions"][worker["action_id"]]["status"], "delivered")
-        for kind, args, _ in self.ops.calls:
+        for kind, args, data in self.ops.calls:
             if kind == "herdr" and args[:2] == ("agent", "start"):
-                self.assertEqual(args[-5:], ("--", "--model", "claude-opus-5-5", "--permission-mode", "auto"))
-            if kind == "herdr" and args[:2] == ("worktree", "create"):
-                self.assertEqual(args[args.index("--base") + 1], "origin/main")
-                issue = args[args.index("--branch") + 1].split("/")[-1]
+                self.assertEqual(args[-7:], (
+                    "--", "--model", "claude-opus-5-5", "--permission-mode", "auto", "--append-system-prompt",
+                    lanes.worker_note("main", "repo with spaces", None)))
+            if kind == "herdr" and args[:2] == ("worktree", "open"):
+                issue = Path(args[args.index("--path") + 1]).name.rsplit("-", 1)[-1]
                 self.assertEqual(args[args.index("--label") + 1], f"repo with spaces #{issue} Issue {issue}")
                 self.assertIn("--no-focus", args)
+            if kind == "git" and args[:2] == ("worktree", "add"):
+                self.assertEqual(args[2], "-b")
+                self.assertTrue(args[3].startswith("issue/"))
+                self.assertEqual(len(args), 5)
         events = registry.read_events(0)
         self.assertEqual(len([event for event in events if event["kind"] == "worker_phase"]), 15)
 
@@ -716,7 +714,7 @@ class StartTests(unittest.TestCase):
         self.ops.issue(2, [])
         self.ops.issue(3, ["ce:brainstorm"])
         summaries = start.start_issues(self.repo, [1, 2, 3], ops=self.ops)
-        self.assertEqual([item["state"] for item in summaries], ["running", "refused", "running"])
+        self.assertEqual([item["state"] for item in summaries], ["running", "refused", "running"], summaries)
         self.assertIn("no assigned CE entry command", summaries[1]["reason"])
         self.assertEqual(len(self.workers()), 2)
 
@@ -824,7 +822,8 @@ class StartTests(unittest.TestCase):
         sleep.assert_not_called()
         self.assertEqual(worker["state"], "start_failed")
         self.assertIn("agent_not_ready", worker["reason"])
-        self.assertNotIn("agent_name", worker)
+        self.assertTrue(worker["agent_name"])
+        self.assertNotIn("storage", worker)
         self.assertTrue(worker["workspace_id"])
         self.assertTrue(Path(worker["worktree_path"]).exists())
         self.assertEqual(self.ops.agents, {})
@@ -874,7 +873,8 @@ class StartTests(unittest.TestCase):
         self.assertEqual(worker["state"], "start_failed")
         self.assertIn("agent_pane_busy", worker["reason"])
         self.assertEqual(worker["phase"], "worktree")
-        self.assertNotIn("agent_name", worker)
+        self.assertTrue(worker["agent_name"])
+        self.assertNotIn("storage", worker)
         self.assertEqual(self.ops.prompts, [])
         attempts = [args for kind, args, _ in self.ops.calls if kind == "herdr" and args[:2] == ("agent", "start")]
         self.assertEqual(len(attempts), 120)
@@ -933,10 +933,9 @@ class StartTests(unittest.TestCase):
             if args[:2] == ("agent", "start") and not interrupted:
                 interrupted = True
                 worker = self.workers()[0]
-                # A watcher can enter the start flow with this same snapshot.
+                # Another observer records a failure while this start reply is in flight.
                 stale = dict(worker)
-                with mock.patch.object(self.ops, "start_error", "agent_not_ready"):
-                    self.assertEqual(start._run_worker(stale, self.ops)["state"], "start_failed")
+                start._record(worker["worker_id"], "worker_start_failed", state="start_failed", reason="agent_not_ready")
                 self.assertEqual(start._run_worker(stale, self.ops)["state"], "start_failed")
             return herdr(*args, **kwargs)
 
@@ -945,12 +944,32 @@ class StartTests(unittest.TestCase):
         self.assertEqual(worker["state"], "start_failed")
         self.assertEqual(worker["phase"], "worktree")
         self.assertIn("agent_not_ready", worker["reason"])
-        self.assertNotIn("agent_name", worker)
+        self.assertTrue(worker["agent_name"])
+        self.assertNotIn("storage", worker)
         self.assertEqual(self.ops.prompts, [])
         self.assertEqual(registry.load()["actions"], {})
         events = registry.read_events(0)
         self.assertEqual(sum(event["kind"] == "worker_start_failed" for event in events), 1)
         self.assertEqual(events[-1]["kind"], "worker_start_failed")
+
+    def test_overlapping_starter_holds_unknown_launch_without_second_spawn(self):
+        self.ops.issue(1)
+        herdr = self.ops.herdr
+        interrupted = False
+        def overlap(*args, **kwargs):
+            nonlocal interrupted
+            if args[:2] == ("agent", "start") and not interrupted:
+                interrupted = True
+                observed = start._run_worker(dict(self.workers()[0]), self.ops)
+                self.assertEqual(observed["state"], "start_failed")
+                self.assertIn("agent_not_found", observed["reason"])
+            return herdr(*args, **kwargs)
+        with mock.patch.object(self.ops, "herdr", side_effect=overlap):
+            worker = start.start_issues(self.repo, [1], ops=self.ops)[0]
+        self.assertEqual(worker["state"], "start_failed")
+        self.assertEqual(sum(kind == "herdr" and args[:2] == ("agent", "start") for kind, args, _ in self.ops.calls), 1)
+        self.assertFalse(self.ops.prompts)
+        self.assertFalse(registry.load()["actions"])
 
     def test_failure_before_entry_intent_prevents_a_prompt(self):
         self.ops.issue(1)
@@ -1050,7 +1069,7 @@ class StartTests(unittest.TestCase):
         self.assertEqual(worker["state"], "start_failed")
         self.assertIn("timeout", worker["reason"])
         self.assertEqual(registry.load()["actions"][worker["action_id"]]["status"], "delivery_unknown")
-        self.assertEqual(next_worker["state"], "running")
+        self.assertEqual(next_worker["state"], "running", next_worker)
         start.start_issues(self.repo, [1], ops=self.ops)
         self.assertEqual(len(self.ops.prompts), 2)
 
@@ -1074,7 +1093,7 @@ class StartTests(unittest.TestCase):
         self.assertEqual(worker["phase"], "mode_checked")
         self.assertEqual(self.ops.escapes, [])
         args = next(args for kind, args, _ in self.ops.calls if kind == "herdr" and args[:2] == ("agent", "start"))
-        self.assertEqual(args[-1], "bypassPermissions")
+        self.assertEqual(args[args.index("--permission-mode") + 1], "bypassPermissions")
 
     def test_restart_after_every_phase_reuses_resources_and_prompt(self):
         for phase in start.PHASES:
@@ -1116,12 +1135,12 @@ class StartTests(unittest.TestCase):
                         self.assertEqual(start.start_issues(repo, [1], ops=ops)[0], interrupted_worker)
                         run_worker = start._run_worker
 
-                        def check_claim(worker, current_ops):
+                        def check_claim(worker, current_ops, **kwargs):
                             self.assertEqual(worker["start_owner"], start._start_owner())
                             self.assertEqual(worker["state"], "starting")
                             self.assertEqual(worker["phase"], phase)
                             self.assertEqual(self.workers()[0], worker)
-                            return run_worker(worker, current_ops)
+                            return run_worker(worker, current_ops, **kwargs)
 
                         with mock.patch.object(start, "_run_worker", side_effect=check_claim):
                             result = start.restart(before.get("agent_name", "#1"), ops=ops)
@@ -1234,16 +1253,15 @@ class StartTests(unittest.TestCase):
         with mock.patch.object(start.time, "sleep", side_effect=materialize):
             self.assertEqual(start.start_issues(self.repo, [1], ops=self.ops)[0]["state"], "running")
 
-    def test_fallback_only_for_unsupported_worktree_command(self):
+    def test_unsupported_open_never_falls_back_to_second_creation(self):
         self.ops.issue(1)
         self.ops.worktree_error = "unknown_command"
         worker = start.start_issues(self.repo, [1], ops=self.ops)[0]
-        self.assertEqual(worker["state"], "running")
-        self.assertEqual(worker["workspace_id"], "fallback-workspace")
-        self.assertTrue(any(kind == "git" and args[:2] == ("worktree", "add") for kind, args, _ in self.ops.calls))
-        workspace = next(args for kind, args, _ in self.ops.calls
-                         if kind == "herdr" and args[:2] == ("workspace", "create"))
-        self.assertEqual(workspace[workspace.index("--label") + 1], "repo with spaces #1 Issue 1")
+        self.assertEqual(worker["state"], "start_failed")
+        self.assertTrue(worker["worktree_created"])
+        self.assertFalse(any(args[:2] in {("worktree", "create"), ("workspace", "create")}
+                             for kind, args, _ in self.ops.calls))
+        self.assertEqual(sum(kind == "git" and args[:2] == ("worktree", "add") for kind, args, _ in self.ops.calls), 1)
 
     def test_duplicate_issue_and_queued_retry_are_idempotent(self):
         registry.update(lambda doc: doc["config"].update(cap=0))
@@ -1314,7 +1332,7 @@ class StartTests(unittest.TestCase):
         self.ops.issue(2, [])
         output = io.StringIO()
         real_start = start.start_issues
-        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane, tag: real_start(repo, issues, lane=lane, tag=tag, ops=self.ops)), mock.patch("sys.stdout", output):
+        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane, tag, contact: real_start(repo, issues, lane=lane, tag=tag, contact=contact, ops=self.ops)), mock.patch("sys.stdout", output):
             self.assertEqual(herdr_coord.main(["start", str(self.repo), "1", "#2"]), 0)
         summaries = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([item["state"] for item in summaries], ["running", "refused"])
@@ -1337,7 +1355,7 @@ class StartTests(unittest.TestCase):
 
         output = io.StringIO()
         real_start = start.start_issues
-        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane, tag: real_start(repo, issues, lane=lane, tag=tag, ops=self.ops)), \
+        with mock.patch.object(start, "start_issues", side_effect=lambda repo, issues, *, lane, tag, contact: real_start(repo, issues, lane=lane, tag=tag, contact=contact, ops=self.ops)), \
                 mock.patch.object(start, "_run_worker", side_effect=fail_third), mock.patch("sys.stdout", output):
             self.assertEqual(herdr_coord.main(["start", str(self.repo), "1", "#2", "3", "4"]), 0)
         summaries = [json.loads(line) for line in output.getvalue().splitlines()]

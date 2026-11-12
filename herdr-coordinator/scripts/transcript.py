@@ -75,6 +75,13 @@ def read_records(path: str | Path, offset: int = 0) -> tuple[list[dict], int]:
     return records, offset
 
 
+def worker_start_offset(worker) -> int:
+    """An adopted session's history predates tracking, including after a watcher restart."""
+    if worker.get("adhoc") and worker.get("adopted_session_id") == worker.get("session_id"):
+        return worker.get("adopted_offset", 0)
+    return 0
+
+
 def _main_records(records):
     for index, record in enumerate(records):
         # A compaction (even one while idle, seen live 2026-10-15) writes its summary as a user
@@ -280,6 +287,7 @@ def classify(
     last_growth_at: float,
     stall_after_seconds: float = 1200,
     expired_background: frozenset = frozenset(),
+    turn_in_progress: bool = False,
 ) -> Classification:
     """Classify accumulated records in file order, using epoch seconds for time.
 
@@ -357,6 +365,8 @@ def classify(
 
     if latest is None:
         return Classification("unknown", detail="no main-thread state records")
+    # An adoption can begin mid-turn, with its initiating prompt before the read boundary.
+    has_prompt = latest_prompt >= 0 or turn_in_progress
     if quota_record is not None:
         quota = quota_record.get("quotaLimits")
         resets_at = quota.get("resetsAt") if isinstance(quota, dict) else None
@@ -365,7 +375,8 @@ def classify(
         return Classification("quota_wait", resets_at, "API quota or rate limit (429)")
     if open_asks:
         return Classification("question", detail="AskUserQuestion has no answer yet")
-    if herdr_status == "blocked" and latest_prompt > latest_end_turn:
+    if herdr_status == "blocked" and (latest_prompt > latest_end_turn
+                                     or (turn_in_progress and latest_end_turn < 0)):
         return Classification("question", detail="herdr blocked during an unfinished turn")
     if pending_tools:
         return Classification("in_tool", detail="tool use has no matching result")
@@ -377,14 +388,14 @@ def classify(
         kind == "assistant"
         and not record.get("isApiErrorMessage")
         and message.get("stop_reason") == "end_turn"
-        and latest_prompt >= 0
+        and has_prompt
     ):
         finished_detail = "assistant ended the latest prompt"
-    elif kind == "interrupt" and latest_prompt >= 0:
+    elif kind == "interrupt" and has_prompt:
         finished_detail = INTERRUPTED
     elif (
         kind in ("user", "tool_result")
-        and latest_prompt >= 0
+        and has_prompt
         and herdr_status == "done"
         and now - last_growth_at >= 120
     ):

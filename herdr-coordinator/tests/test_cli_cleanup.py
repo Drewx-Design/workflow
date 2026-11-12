@@ -19,6 +19,12 @@ import watch
 
 
 class CleanupCommandTest(unittest.TestCase):
+    def test_cleanup_records_finished_worker_without_storage_receipt(self):
+        with mock.patch.object(finish, "cleanup", return_value={"cleaned": True}):
+            herdr_coord._cleanup(ops=object())
+        self.assertEqual(registry.load()["workers"]["w-done"]["state"], "cleaned")
+        self.assertEqual(registry.read_events(0)[-1]["payload"], {"worker_id": "w-done", "issue": 1})
+
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
         self.env = mock.patch.dict(os.environ, {"HERDR_COORD_HOME": self.home.name})
@@ -119,9 +125,8 @@ class CleanupCommandTest(unittest.TestCase):
         self.assertEqual(worker["state"], "cleaned")
         self.assertTrue(worker["abandoned"])
         self.assertEqual(worker["branch"], "issue/1930")
-        self.assertEqual([(kind, args) for kind, args, _ in ops.calls], [
-            ("git", ("worktree", "remove", str(worktree))),
-        ])
+        self.assertEqual(ops.calls, [])
+        self.assertTrue(worktree.is_dir())
 
     def test_cleans_only_eligible_workers_and_records_the_result(self):
         calls = []
@@ -322,7 +327,7 @@ class CleanupCommandTest(unittest.TestCase):
             self.assertEqual(sorted(seen), ["w-done", "w-parked"])
 
     def test_status_says_when_a_failed_start_left_its_session_open(self):
-        # boon-town #2422: a failed start's session sat idle for four days; status read "start_failed PR=-".
+        # an observed incident: a failed start's session sat idle for four days; status read "start_failed PR=-".
         worker = {"worker_id": "w", "issue": 2422, "agent_name": "a-2422", "state": "start_failed"}
 
         class Ops:

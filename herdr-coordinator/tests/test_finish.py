@@ -6,10 +6,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import copy
 import os
-import shutil
-import stat
 import subprocess
-import types
 import tempfile
 import unittest
 from unittest import mock
@@ -69,9 +66,6 @@ class FakeOps:
         self.checks = success([check()])
         self.agent = failure("No agent occupies the pane", "agent_not_found")
         self.close = success({"result": {}})
-        self.remove = success({"result": {}})
-        self.git_remove = success()
-        self.git_list = None  # set by FinishTest: lists the worker's tree as registered
         self.git_status = success()
         self.git_diff = success()
         self.pr_view = success(pr(state="MERGED", number=309))
@@ -95,15 +89,14 @@ class FakeOps:
         replies = {
             ("agent", "get"): self.agent,
             ("workspace", "close"): self.close,
-            ("worktree", "remove"): self.remove,
         }
         if args[:2] not in replies:
             raise AssertionError(f"unexpected herdr command: {args}")
         return self._reply("herdr", args, kwargs, replies[args[:2]])
 
     def git(self, *args, **kwargs):
-        replies = {("worktree", "remove"): self.git_remove, ("status", "--porcelain"): self.git_status,
-                   ("diff", "--name-only"): self.git_diff, ("worktree", "list"): self.git_list}
+        replies = {("status", "--porcelain"): self.git_status,
+                   ("diff", "--name-only"): self.git_diff}
         if args[:2] not in replies:
             raise AssertionError(f"unexpected git command: {args}")
         return self._reply("git", args, kwargs, replies[args[:2]])
@@ -124,7 +117,6 @@ class FinishTest(unittest.TestCase):
             "branch": "issue/7", "agent_name": "issue-7-probe", "workspace_id": "workspace-7",
         }
         self.ops = FakeOps()
-        self.ops.git_list = self.listing(self.worktree)
         self.config = {}
         self.final = "Please tell me which product behavior you want."
         self.records = records_with_final(self.final)
@@ -714,7 +706,7 @@ class FinishTest(unittest.TestCase):
                 self.assertIn("still alive", result["reason"])
                 self.assertEqual(len(self.ops.calls), 2)
 
-    def test_cleanup_merged_exited_worker_closes_then_removes_without_force(self):
+    def test_cleanup_merged_exited_worker_closes_and_retains_worktree(self):
         self.ops.prs = success([pr(state="MERGED")])
         before = copy.deepcopy(self.worker)
         result = finish.cleanup(self.worker, ops=self.ops)
@@ -723,7 +715,6 @@ class FinishTest(unittest.TestCase):
         self.assertEqual([(call[0], call[1]) for call in self.ops.calls[1:]], [
             ("herdr", ("agent", "get", "issue-7-probe")),
             ("herdr", ("workspace", "close", "workspace-7")),
-            ("herdr", ("worktree", "remove", "--workspace", "workspace-7")),
         ])
         self.assertTrue(self.worktree.exists())
         self.assertTrue(all("--force" not in call[1] and "branch" not in call[1] for call in self.ops.calls))
@@ -737,11 +728,10 @@ class FinishTest(unittest.TestCase):
         self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
         self.assertTrue(all(call[0] != "gh" for call in self.ops.calls))
 
-    def test_cleanup_without_an_agent_removes_through_git_and_keeps_the_branch(self):
+    def test_cleanup_without_an_agent_retains_worktree_and_branch(self):
         self.worker.pop("agent_name")
         self.worker.update(state="start_failed", abandoned=True)
         self.ops.agent = AssertionError("no agent was ever started")
-        self.ops.remove = AssertionError("a no-agent worktree is removed through git")
         self.ops.prs = AssertionError("abandoned worker must not query GitHub")
         for workspace in (None, "workspace-7"):
             with self.subTest(workspace=workspace):
@@ -754,44 +744,20 @@ class FinishTest(unittest.TestCase):
                 self.assertTrue(result["cleaned"])
                 self.assertIn("branch retained", result["reason"])
                 expected = [("herdr", ("workspace", "close", workspace))] if workspace else []
-                expected.append(("git", ("worktree", "remove", str(self.worktree))))
                 self.assertEqual([(kind, args) for kind, args, _ in self.ops.calls], expected)
-                self.assertEqual(self.ops.calls[-1][2]["cwd"], str(self.repo))
                 self.assertEqual(self.worker, before)
 
-    def test_cleanup_without_an_agent_refuses_a_dirty_registered_worktree(self):
+    def test_cleanup_without_an_agent_retains_dirty_worktree(self):
         self.worker.pop("agent_name")
         self.worker.pop("workspace_id")
         self.worker.update(state="start_failed", abandoned=True)
         marker = self.worktree / "notes.md"
         marker.write_text("keep", encoding="utf-8")
-        self.ops.git_remove = failure("worktree contains modified or untracked files")
-
         result = finish.cleanup(self.worker, ops=self.ops)
-
-        self.assertFalse(result["cleaned"])
-        self.assertIn("modified or untracked files", result["reason"])
+        self.assertTrue(result["cleaned"])
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-        self.assertEqual([(kind, args) for kind, args, _ in self.ops.calls], [
-            ("git", ("worktree", "remove", str(self.worktree))),
-            ("git", ("worktree", "list", "--porcelain")),
-        ])
+        self.assertEqual(self.ops.calls, [])
         self.assertEqual(self.worker["branch"], "issue/7")
-
-    def test_cleanup_without_an_agent_settles_an_already_removed_worktree(self):
-        self.worker.pop("agent_name")
-        self.worker.pop("workspace_id")
-        self.worker.update(state="start_failed", abandoned=True)
-        self.worktree.rmdir()
-        self.ops.git_remove = failure(f"fatal: '{self.worktree}' is not a working tree")
-        self.ops.git_list = self.listing()
-
-        with mock.patch.object(finish, "_finish_unregistered", wraps=finish._finish_unregistered) as settle:
-            result = finish.cleanup(self.worker, ops=self.ops)
-
-        settle.assert_called_once_with(self.worker, self.ops)
-        self.assertEqual(result, {"cleaned": True, "reason": "worktree was already removed; branch retained"})
-        self.assertTrue(all(kind == "git" for kind, _, _ in self.ops.calls))
 
     def test_cleanup_without_an_agent_still_requires_repository_and_worktree_identity(self):
         self.worker.pop("agent_name")
@@ -804,58 +770,12 @@ class FinishTest(unittest.TestCase):
                 self.assertIn("identity", result["reason"])
                 self.assertEqual(self.ops.calls, [])
 
-    def listing(self, *trees):
-        return adapters.CommandResult(True, 0, "".join(f"worktree {Path(tree).as_posix()}\nHEAD abc\nbranch refs/heads/x\n\n"
-                                                       for tree in (self.repo, *trees)), "", None)
-
-    def test_cleanup_returns_worktree_remove_refusal_without_fallback(self):
-        self.ops.prs = success([pr(state="MERGED")])
-        self.ops.remove = failure("worktree is dirty", "dirty_worktree")
-        result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertEqual(result, {"cleaned": False, "reason": "worktree is dirty"})
-        self.assertEqual(len(self.ops.calls), 5)
-        self.assertEqual([call[1][:2] for call in self.ops.calls if call[0] == "git"], [("worktree", "list")])
-        self.assertTrue(self.worktree.exists())
-
-    def test_cleanup_settles_a_removal_git_already_made(self):
-        # Live 2026-10-14 (taste-swipe #37/#39): git unregistered the tree, then stopped at
-        # "Directory not empty"; every later cleanup failed with "is not a working tree".
-        self.ops.prs = success([pr(state="MERGED")])
-        self.ops.close = failure("Workspace not found", "workspace_not_found")
-        self.ops.git_remove = failure(f"fatal: '{self.worktree}' is not a working tree")
-        self.ops.git_list = self.listing()
-        (self.worktree / "node_modules" / "deep").mkdir(parents=True)
-        result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertFalse(result["cleaned"])
-        self.assertIn(f"the user deletes {self.worktree}", result["reason"])
-        self.assertTrue((self.worktree / "node_modules" / "deep").exists())  # cleanup never deletes it
-        shutil.rmtree(self.worktree)  # the user deletes the folder by hand
-        result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertEqual(result, {"cleaned": True, "reason": "worktree was already removed; branch retained"})
-
-    def test_cleanup_keeps_a_refusal_unless_git_says_the_tree_is_gone(self):
-        self.ops.prs = success([pr(state="MERGED")])
-        self.ops.close = failure("Workspace not found", "workspace_not_found")
-        self.ops.git_remove = failure("Directory not empty")
-        shutil.rmtree(self.worktree)
-        moved = adapters.CommandResult(True, 0, f"worktree {self.repo.as_posix()}\nHEAD abc\nbranch refs/heads/main\n\n"
-                                                f"worktree {(self.root / 'moved').as_posix()}\nHEAD abc\n"
-                                                "branch refs/heads/issue/7\n\n", "", None)
-        for label, listing in (("still registered", self.listing(self.worktree)),
-                               ("moved, branch still checked out", moved),
-                               ("git cannot list", failure("not a git repository"))):
-            with self.subTest(label):
-                self.ops.git_list = listing
-                self.assertEqual(finish.cleanup(self.worker, ops=self.ops),
-                                 {"cleaned": False, "reason": "Directory not empty"})
-
-    def test_cleanup_workspace_already_gone_uses_git_from_repository(self):
+    def test_cleanup_workspace_already_gone_retains_worktree(self):
         self.ops.prs = success([pr(state="MERGED")])
         self.ops.close = failure("Workspace not found", "workspace_not_found")
         self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
-        self.assertEqual(self.ops.calls[-1][0:2], ("git", ("worktree", "remove", str(self.worktree))))
-        self.assertEqual(self.ops.calls[-1][2]["cwd"], str(self.repo))
-        self.assertTrue(all("--force" not in call[1] for call in self.ops.calls))
+        self.assertTrue(self.worktree.is_dir())
+        self.assertFalse(any(kind == "git" for kind, _, _ in self.ops.calls))
 
     def junction(self, link, target):
         if os.name != "nt":
@@ -946,8 +866,8 @@ class FinishTest(unittest.TestCase):
                 self.records = records
                 self.assertEqual(self.verify()["state"], expected)
 
-    def test_cleanup_unlinks_a_node_modules_junction_before_real_git_removes_the_tree(self):
-        # Live 2026-10-15: the worktree's node_modules was a junction to the main
+    def test_cleanup_leaves_node_modules_junctions_and_their_targets_untouched(self):
+        # Live 2026-10-15 (an observed incident): the worktree's node_modules was a junction to the main
         # checkout's, and `git worktree remove` (no --force) emptied the main checkout's node_modules.
         def git(*args, cwd, **kwargs):
             subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
@@ -965,97 +885,15 @@ class FinishTest(unittest.TestCase):
         self.junction(tree / "packages" / "app" / "node_modules", repo / "node_modules")
         self.ops.git = adapters.git
         self.ops.prs = success([pr(state="MERGED")])
-        self.ops.remove = failure("workspace w1V not found", "workspace_not_found")
         self.worker.update(repo_path=str(repo), worktree_path=str(tree))
         self.assertEqual(finish.cleanup(self.worker, ops=self.ops),
-                         {"cleaned": True, "reason": "workspace and worktree removed; branch retained"})
-        self.assertFalse(tree.exists())
+                         {"cleaned": True, "reason": "worker finished; worktree left for the nightly sweep; branch retained"})
+        self.assertTrue(tree.is_dir())
+        self.assertTrue(os.path.isjunction(tree / "node_modules"))
+        self.assertTrue(os.path.isjunction(tree / "packages" / "app" / "node_modules"))
         self.assertEqual((repo / "node_modules" / "pkg" / "index.js").read_text(encoding="utf-8"), "keep")
 
-    def test_cleanup_keeps_links_in_a_tree_it_will_not_remove(self):
-        target = self.root / "shared"
-        (target / "pkg").mkdir(parents=True)
-        self.junction(self.worktree / "node_modules", target)
-        self.ops.prs = success([pr(state="MERGED")])
-        for label, status, reason in (
-            ("dirty", adapters.CommandResult(True, 0, " M notes.md\n", ""), "uncommitted changes"),
-            ("unknown", failure("not a git repository"), "cannot confirm the worktree is clean"),
-        ):
-            with self.subTest(label):
-                self.ops.git_status = status
-                self.ops.calls.clear()
-                result = finish.cleanup(self.worker, ops=self.ops)
-                self.assertFalse(result["cleaned"])
-                self.assertIn(reason, result["reason"])
-                self.assertTrue(os.path.isjunction(self.worktree / "node_modules"))
-                self.assertFalse([c for c in self.ops.calls if c[1][:2] == ("worktree", "remove")])
-        self.assertTrue((target / "pkg").is_dir())
-
-    def test_directory_reparse_points_are_classified_fail_closed(self):
-        reparse, directory = stat.FILE_ATTRIBUTE_REPARSE_POINT, stat.FILE_ATTRIBUTE_DIRECTORY
-        info = lambda attributes, tag=0, mode=stat.S_IFDIR: types.SimpleNamespace(
-            st_file_attributes=attributes, st_reparse_tag=tag, st_mode=mode)
-        for label, entry, expected in (
-            ("folder", info(directory), None),
-            ("junction", info(directory | reparse, stat.IO_REPARSE_TAG_MOUNT_POINT), "link"),
-            ("directory symlink, even broken", info(directory | reparse, stat.IO_REPARSE_TAG_SYMLINK), "link"),
-            ("file symlink", info(reparse, stat.IO_REPARSE_TAG_SYMLINK, stat.S_IFREG), None),
-            ("unknown directory reparse point", info(directory | reparse, 0x9000701A), "other"),
-            ("POSIX symlink", types.SimpleNamespace(st_mode=stat.S_IFLNK), "link"),
-        ):
-            with self.subTest(label):
-                self.assertEqual(finish._directory_reparse(entry), expected)
-
-    def test_finish_imports_without_the_windows_only_reparse_tags(self):
-        code = ("import stat, sys; del stat.IO_REPARSE_TAG_MOUNT_POINT, stat.IO_REPARSE_TAG_SYMLINK; "
-                f"sys.path.insert(0, {str(Path(finish.__file__).parent)!r}); import finish; "
-                "print(sorted(finish._LINK_TAGS))")
-        if not hasattr(stat, "IO_REPARSE_TAG_SYMLINK"):
-            code = code.replace("del stat.IO_REPARSE_TAG_MOUNT_POINT, stat.IO_REPARSE_TAG_SYMLINK; ", "")
-        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip(), str(sorted({0xA0000003, 0xA000000C})))
-
-    def test_leftover_folder_after_unlinking_names_the_unlinked_links(self):
-        target = self.root / "shared"
-        target.mkdir()
-        self.junction(self.worktree / "node_modules", target)
-        self.ops.prs = success([pr(state="MERGED")])
-        self.ops.remove = failure("Directory not empty", "command_failed")
-        self.ops.git_list = self.listing()  # git unregistered the tree but left its folder
-        result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertFalse(result["cleaned"])
-        self.assertIn("left its folder", result["reason"])
-        self.assertIn(f"already unlinked: {self.worktree / 'node_modules'}", result["reason"])
-        self.assertTrue(target.is_dir())
-
-    def test_cleanup_refuses_an_unknown_reparse_point(self):
-        (self.worktree / "cloud").mkdir()
-        self.ops.prs = success([pr(state="MERGED")])
-        real, seen = finish._directory_reparse, []
-        unknown = types.SimpleNamespace(st_file_attributes=stat.FILE_ATTRIBUTE_DIRECTORY | stat.FILE_ATTRIBUTE_REPARSE_POINT,
-                                        st_reparse_tag=0x9000701A, st_mode=stat.S_IFDIR)
-
-        def classify(info):  # the worktree root is checked first; its one entry is the unknown one
-            seen.append(info)
-            return real(info if len(seen) == 1 else unknown)
-
-        with mock.patch.object(finish, "_directory_reparse", side_effect=classify):
-            result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertFalse(result["cleaned"])
-        self.assertIn("reparse point cleanup does not know", result["reason"])
-        self.assertFalse([c for c in self.ops.calls if c[1][:2] == ("worktree", "remove")])
-
-    def test_cleanup_refuses_a_link_scan_over_its_time_budget(self):
-        (self.worktree / "pkg").mkdir()
-        self.ops.prs = success([pr(state="MERGED")])
-        with mock.patch.object(finish, "LINK_SCAN_SECONDS", -1):
-            result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertFalse(result["cleaned"])
-        self.assertIn("checking", result["reason"])
-        self.assertFalse([c for c in self.ops.calls if c[1][:2] == ("worktree", "remove")])
-
-    def test_cleanup_unlinks_a_broken_directory_symlink(self):
+    def test_cleanup_retains_a_broken_directory_symlink(self):
         if os.name != "nt":
             self.skipTest("Windows directory symlinks")
         gone = self.root / "gone"
@@ -1067,64 +905,7 @@ class FinishTest(unittest.TestCase):
         gone.rmdir()
         self.ops.prs = success([pr(state="MERGED")])
         self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
-        self.assertFalse(os.path.lexists(self.worktree / "cache"))
-
-    def test_cleanup_names_links_it_already_unlinked_when_it_stops(self):
-        target = self.root / "shared"
-        target.mkdir()
-        self.junction(self.worktree / "a", target)
-        self.junction(self.worktree / "b", target)
-        self.ops.prs = success([pr(state="MERGED")])
-        real_rmdir, calls = os.rmdir, []
-
-        def rmdir(path):
-            calls.append(path)
-            if len(calls) == 2:
-                raise PermissionError("in use")
-            real_rmdir(path)
-
-        with mock.patch.object(finish.os, "rmdir", side_effect=rmdir):
-            result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertFalse(result["cleaned"])
-        self.assertIn(f"cannot unlink the linked folder {calls[1]}", result["reason"])
-        self.assertIn(f"already unlinked: {calls[0]}", result["reason"])
-        self.assertFalse([c for c in self.ops.calls if c[1][:2] == ("worktree", "remove")])
-        self.ops.remove = failure("worktree is locked", "worktree_locked")
-        result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertEqual(result["reason"], f"worktree is locked (these linked folders were already unlinked: {calls[1]})")
-        self.assertTrue(target.is_dir())
-
-    def test_cleanup_refuses_a_worktree_path_that_is_itself_a_link(self):
-        real = self.root / "real tree"
-        real.mkdir()
-        shutil.rmtree(self.worktree)
-        self.junction(self.worktree, real)
-        self.ops.prs = success([pr(state="MERGED")])
-        result = finish.cleanup(self.worker, ops=self.ops)
-        self.assertEqual(result["cleaned"], False)
-        self.assertIn("is itself a link", result["reason"])
-        self.assertFalse([c for c in self.ops.calls if c[1][:2] == ("worktree", "remove")])
-        self.assertTrue(real.is_dir())
-
-    def test_cleanup_git_fallback_refusal_is_returned(self):
-        self.ops.prs = success([pr(state="MERGED")])
-        self.ops.close = failure("Workspace not found", "workspace_not_found")
-        self.ops.git_remove = failure("contains modified files")
-        self.assertEqual(finish.cleanup(self.worker, ops=self.ops), {"cleaned": False, "reason": "contains modified files"})
-
-    def test_cleanup_removes_through_git_when_the_closed_workspace_is_gone(self):
-        # Live 2026-10-15: the first cleanup closed the window, then
-        # `worktree remove --workspace` failed with workspace_not_found and nothing was cleaned.
-        self.ops.prs = success([pr(state="MERGED")])
-        self.ops.remove = failure("workspace w1V not found", "workspace_not_found")
-        self.assertEqual(finish.cleanup(self.worker, ops=self.ops),
-                         {"cleaned": True, "reason": "workspace and worktree removed; branch retained"})
-        self.assertEqual([(call[0], call[1][:2]) for call in self.ops.calls[1:]], [
-            ("herdr", ("agent", "get")), ("herdr", ("workspace", "close")),
-            ("herdr", ("worktree", "remove")), ("git", ("worktree", "remove")),
-        ])
-        self.assertEqual(self.ops.calls[-1][2]["cwd"], str(self.repo))
-        self.assertTrue(all("--force" not in call[1] for call in self.ops.calls))
+        self.assertTrue(os.path.lexists(self.worktree / "cache"))
 
     def test_cleanup_uncertain_agent_exit_and_close_failure_are_refusals(self):
         self.ops.prs = success([pr(state="MERGED")])
@@ -1161,14 +942,13 @@ class FinishTest(unittest.TestCase):
                     self.ops.calls.clear()
                     self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
                     self.assertEqual([(call[0], call[1][:2]) for call in self.ops.calls[1:]], [
-                        ("herdr", ("agent", "get")), ("git", ("status", "--porcelain")),
+                        ("herdr", ("agent", "get")),
                         ("herdr", ("agent", "get")),  # still idle just before the close
-                        ("herdr", ("workspace", "close")), ("herdr", ("worktree", "remove")),
+                        ("herdr", ("workspace", "close")),
                     ])
-                    self.assertEqual(self.ops.calls[2][2]["cwd"], str(self.worktree))
 
     def test_cleanup_abandon_closes_a_failed_starts_idle_session(self):
-        # boon-town #2422: the session a failed start left open could not be closed by any command.
+        # an observed incident: the session a failed start left open could not be closed by any command.
         self.worker.update(state="start_failed", abandoned=True)
         self.ops.prs = AssertionError("abandoned worker must not query GitHub")
         for status, cleaned in (("idle", True), ("working", False)):
@@ -1177,7 +957,7 @@ class FinishTest(unittest.TestCase):
                 self.assertEqual(finish.cleanup(self.worker, ops=self.ops)["cleaned"], cleaned)
         self.ops.agent = self.alive("idle")
         self.ops.git_status = adapters.CommandResult(True, 0, " M notes.md\n", "")
-        self.assertIn("uncommitted changes", finish.cleanup(self.worker, ops=self.ops)["reason"])
+        self.assertTrue(finish.cleanup(self.worker, ops=self.ops)["cleaned"])
         # Not abandoned: a failed start has no PR, so a merged PR never closes its session.
         self.ops.git_status = success()
         self.worker.update(abandoned=False, pr=12, merged_pr_named=True)
@@ -1203,15 +983,12 @@ class FinishTest(unittest.TestCase):
         self.assertIn("became working", result["reason"])
         self.assertFalse([c for c in self.ops.calls if c[1][:2] in {("workspace", "close"), ("worktree", "remove")}])
 
-    def test_cleanup_never_closes_a_busy_agent_dirty_tree_or_unfinished_worker(self):
+    def test_cleanup_never_closes_a_busy_or_unfinished_worker(self):
         self.ops.prs = success([pr(state="MERGED")])
-        dirty = adapters.CommandResult(True, 0, " M notes.md\n", "")
         cases = (
             ("done", "working", success(), "agent is working"),
             ("done", "blocked", success(), "agent is blocked"),
             ("done", None, success(), "unknown state"),
-            ("done", "idle", dirty, "uncommitted changes"),
-            ("done", "idle", failure("not a git repository"), "cannot confirm the worktree is clean"),
             ("running", "idle", success(), "still alive"),
             ("lost", "idle", success(), "still alive"),
         )

@@ -32,6 +32,18 @@ from test_transcript import background_pair, background_notification
 
 
 class WatchTests(unittest.TestCase):
+    def test_terminal_poll_keeps_reopen_observation(self):
+        self.set_state("done")
+        worker = actions.worker_named("worker")
+        observed = []
+        def reopen(current, ops, now):
+            observed.append("reopen")
+            self.set_state("running", state_token="new-turn")
+        with mock.patch.object(watch, "_reopen_if_in_use", side_effect=reopen):
+            watch._poll_worker(worker, self.ops, 10)
+        self.assertEqual(observed, ["reopen"])
+        self.assertEqual(actions.worker_named("worker")["state"], "running")
+
     def setUp(self):
         fixtures.ActionTests.setUp(self)
         snapshot = mock.patch.object(lanes, "read_snapshot", return_value={
@@ -2431,6 +2443,16 @@ class WatchTests(unittest.TestCase):
         current = registry.load()["lanes"]["main"]
         self.assertEqual(current["ack_seq"], last)
         self.assertNotIn("woken_through", current)
+
+    def test_follow_wake_acks_another_lanes_unattended_alert_but_wakes_for_its_own(self):
+        other = registry.append_event("lane_unattended", {"lane": "seo", "ts": 1})
+        with mock.patch.object(registry, "ack", wraps=registry.ack) as ack:
+            self.assertEqual(self.wake_once(sleeps=1), (0, ""))
+        ack.assert_called_once_with(other, lane="main")
+        own = registry.append_event("lane_unattended", {"lane": "main", "ts": 2})
+        code, output = self.wake_once()
+        self.assertEqual(code, 0)
+        self.assertEqual([json.loads(line)["seq"] for line in output.splitlines()], [own])
 
     def test_follow_wake_prints_actionable_batch_and_intervening_bookkeeping(self):
         for compact in (False, True):
