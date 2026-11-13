@@ -2,6 +2,8 @@
 
 [Back to the tool overview](README.md). These are the assumptions and commands for adapting my Windows setup.
 
+These instructions apply to the earlier source snapshot in this folder. My replacement sweep is described in [the current approach](CURRENT.md); its source and installation instructions are not part of this export.
+
 ## Requirements and tests
 
 The runtime uses Node.js built-ins, Git, GitHub CLI, and Windows PowerShell. Windows 11 is the supported environment; process inspection, junction handling, notifications, and Task Scheduler are Windows-specific. Use Node.js matching `^20.20.0 || >=22.22.0`.

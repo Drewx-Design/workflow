@@ -4,7 +4,7 @@
 
 I use Compound Engineering to move from a product question to a reviewed change. My adaptations divide responsibilities between models, keep implementation within the agreed scope, and carry useful lessons into the next task. I define the product goals and make the decisions that need my judgment.
 
-The underlying method and plugin come from [Compound Engineering, maintained by Kieran Klaassen and Trevin Chow](https://every.to/guides/compound-engineering). This page describes my configuration and working rules as of **November 3, 2026**. The tools elsewhere in this repository support that workflow; the [development notes](#development-notes) distinguish recent work from the published source snapshots.
+The underlying method and plugin come from [Compound Engineering, maintained by Kieran Klaassen and Trevin Chow](https://every.to/guides/compound-engineering). This page describes my configuration and working rules as of **November 13, 2026**. The tools elsewhere in this repository support that workflow; the [development notes](#development-notes) distinguish recent work from the published source snapshots.
 
 ## From question to working product
 
@@ -25,19 +25,19 @@ These are my configured roles, rather than a general ranking of models:
 | Consequential architecture and readiness checks | Codex Astra | Is there a material implementation or release problem? |
 | Unresolved design and interaction choices | Claude Fable 5.1 | Which alternative best serves the user, and what evidence could reverse that choice? |
 | Premise and risk review | GLM-5.3 | Which assumption, failure case, or alternative has been missed? |
-| Experimental scope audit | Kimi K3.1 Pro | Does the implementation add unrequested interface elements or omit planned ones? |
+| Advisory scope review of substantial UI plans and final UI changes | Kimi K3.1 Pro | Does the work add unrequested interface elements or omit required ones? |
 
 Routine detached Codex workers currently request `gpt-6.1-sol` at `xhigh`; senior checkpoints request `gpt-6-astra`, with `high` for implementation and debugging or `xhigh` for review. These are dated settings. The routine allocation remains provisional while a planned comparison is pending.
 
 If Claude is unavailable, Codex can fill its planning and synthesis roles, with the substitution recorded and a separate GLM review for substantial plans. A second model from the same family is still same-family review.
 
-### Current experiment: Kimi scope review
+### Keeping a reviewer based on what it catches
 
-From October 26 to November 26, I am testing Kimi K3.1 Pro as an advisory fourth model family on roughly ten UI changes implemented without me present. It compares the final changes, after review and fixes, with the agreed plan or issue criteria. It looks for unrequested controls, messages, states, or behaviors, as well as missing required elements.
+On November 12, I made Kimi scope review a standing advisory role. At the initial five-PR checkpoint, the reviewing host verified findings missed by the other reviewers on four of the five PRs. One example was a Download button that disappeared when a check failed, although the agreed interface required it to remain visible and disabled. The change was corrected after the finding was checked against the plan and source.
 
-I track confirmed issues it finds that other reviewers missed, false flags, and the time needed to verify its findings. Each applicable PR records the audit or why it was not run. Two reasoning-effort settings are assigned by a rule fixed in advance. The trial stops early after five counted PRs if there are no confirmed unique catches or false flags exceed catches.
+The role now covers substantial UI plans before implementation and the final UI diff after review and fixes. It asks which controls, messages, states, or behaviors exceed the request and which required elements are missing. Each applicable PR records the audit or why it was not run.
 
-Kimi does not implement changes or replace the required reviews in this trial. Its findings must be checked against the plan and source before they affect a review decision. Results are pending.
+I track confirmed findings, false flags, and verification time. The [evaluation note](../results/2026-11-13-kimi.md) gives the checkpoint's scope and examples, including the mixed results from later runs. Kimi's findings remain advisory and must be checked against the plan and source. I will review its usefulness after ten more counted runs.
 
 ## Rules that shape the work
 
@@ -48,6 +48,8 @@ Kimi does not implement changes or replace the required reviews in this trial. I
 **Match review to the change.** Permissions, persistent data, concurrency, external interfaces, and irreversible rollout trigger additional scrutiny. Existing review coverage is reused when the artifact is unchanged. An amendment gets a focused review of the affected portion. If repeated amendments keep introducing new findings, the rule calls for a decision table or executable test to settle the contract.
 
 **Check the version being delivered.** Verification records identify the code revision they checked. A source-only review is labeled as such. Workers cannot edit their way past a passing test result and still treat that earlier result as proof of the final change.
+
+**Check that a test can detect the defect.** For a bug fix or new behavior, my test rules require an assertion that fails without the change and passes with it. If the old code cannot load the test, the alternative is a deliberately wrong version that can run. For risky changes, such as permissions or deletion, the rules also require deliberately changing relevant decisions and checking whether the tests notice. The PR names what was checked and explains any changes the tests missed. This is my verification standard; a passing test count alone does not establish it.
 
 **Keep product scope explicit.** For hands-off UI work, the plan lists the controls, messages, and interaction states it requires. Workers report missing product decisions rather than adding new features on their own. The PR surfaces additions that cannot be traced to the plan so I can resolve them before merge. This scope-control practice was introduced on October 26; its effect is being evaluated.
 
@@ -71,13 +73,17 @@ Useful lessons go into the existing Compound Engineering knowledge files with th
 
 ## Development notes
 
-These November 3 notes describe work in my development repository. The published tool folders remain dated source snapshots; the additions below are not included in those exports.
+These November 13 notes describe work in my development repositories. The sorter and cleanup source folders remain older snapshots; their newer behavior is described separately below.
 
 **Sorter: explain selection, then follow the outcome.** New reporting has merged into the development repository. It explains why issues stayed out of the working set and follows considered work through eligibility, selection, confirmed board placement, and later outcomes. A replay can test whether removing a particular rule would have changed admission, while reporting the coverage of the evidence.
 
 That gives me a way to investigate an apparently surprising ranking. A high score can still sit outside Now because the work lacks definition, falls outside the milestone, or has no available slot. The [published method](../sorter/METHOD.md) explains those tradeoffs; the newer reports make their effects inspectable. The first outcome scorecard establishes a baseline. Its follow-up window is still maturing; ranking quality and delivery effects remain to be measured.
 
-**Cleanup: narrow the automatic job.** The current development branch limits scheduled cleanup to merged, clean, inactive Windows checkouts. Dirty, unmerged, and complex recovery cases remain for supervised handling. It also keeps the installed executable version stable until an explicit reinstall. This is an application of the smallest-solution rule: automate ordinary completed work and preserve the operator's control over exceptions. Integration and installation of this narrower version are not confirmed in this snapshot.
+The newer reporting also distinguishes work ready to build from work needing investigation, definition, or a product decision. The [next-action example](../sorter/METHOD.md#from-priority-to-the-next-action-development-update) shows how the same valuable issue moves toward implementation as its missing information is supplied. Automatic worker selection remains a separate development step.
+
+**Cleanup: make completion and recovery explicit.** I replaced the earlier storage-manager workflow with a machine-wide worktree sweep. Sessions can record a worktree's owner and mark their work done. The sweep checks whether a checkout can be removed and preserves eligible unfinished work on a local recovery branch, with instructions for restoring it. The [current approach](../worktree-cleanup/CURRENT.md) explains those decisions; the public source folder retains the earlier implementation.
+
+**Coordinator: supervise sessions with fewer interruptions.** The November 11 public update can adopt sessions started by hand, keep workers attached to their own coordinator, and wake that coordinator for actionable events while acknowledging routine bookkeeping silently. The [overview](../herdr-coordinator/README.md) explains how I use those capabilities.
 
 ## How the tools fit
 

@@ -1,5 +1,7 @@
 # Worktree cleanup
 
+**Earlier implementation.** This folder preserves the sanitized source snapshot of my previous cleanup tool. I have since replaced the storage-manager workflow with a machine-wide sweep. Read [the current approach](CURRENT.md) for owner records, explicit completion marks, and recovery before removal. The replacement's source is not included in this export; the walkthrough below describes the earlier tool.
+
 Parallel agent work leaves branches, linked worktrees, and unfinished files behind. I use this tool to inspect that work before deciding what can be removed. A quiet directory alone does not establish that its work is finished or recoverable.
 
 The tool checks repository identity, Git state, process and session activity, leases, links, and recovery evidence. Eligible dirty work can take a rescue or archive path. Unknown state is held for inspection. Removal rechecks its evidence immediately before acting.
@@ -28,7 +30,7 @@ I decide whether to commission scratch publication, install the schedule, releas
 
 ## In use
 
-I run cleanup on my Windows development environment. Its reports distinguish completed removals from proposed actions and holds, and preserve recovery information where applicable. See the [usage note](../results/2026-10-27.md) for recorded outcomes and the [adaptation guide](ADAPTING.md) for platform assumptions and verification scope.
+I used this implementation on my Windows development environment. Its reports distinguish completed removals from proposed actions and holds, and preserve recovery information where applicable. See the [usage note](../results/2026-10-27.md) for recorded outcomes from this version and the [adaptation guide](ADAPTING.md) for its platform assumptions and verification scope.
 
 ## Explore or adapt
 

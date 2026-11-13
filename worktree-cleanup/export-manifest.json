@@ -1,9 +1,10 @@
 {
   "sourceCommit": "2daf2daa1c3257240f82b6846a11c008a03c5ddf",
   "files": {
+    "CURRENT.md": "f6565bd28ad59f8c163898cc539cca598522db08c362c86578464ad869cea706",
     ".npmrc": "a093bb2fed59d699b7f9a62a5203cc196054c624e9c39c6d908c9e7db5dd2464",
-    "ADAPTING.md": "c7aa06ba1262c100a8b602c2264ccea8970b6fad8578d3bbd91af7cd5a176025",
-    "README.md": "9d8469cef2b2fe2a2f48f979a029456893b34cd6eb8fca3f9052624482a74702",
+    "ADAPTING.md": "35745e5c7963a939824d8327783afe13e2a4dd90a57eca95ff42134e5dbb77f4",
+    "README.md": "5adc82df45e88c0f9837314ec512a24df886f766a491e0c4790bdc1f4ec26c5d",
     "package-lock.json": "f758e6e1b852302438b46d2b8ce47910679324bbffb65379701455dc9d72f7ba",
     "package.json": "0bbfaa7c8d9c2c80f3ca6a03b939faabd7b1c9ccf4825952ab345b75ba3a4dab",
     "scripts/__tests__/worktree-cleanup-activity.test.ts": "af04afa6931bba68c07b12210f017a8e4d7e4fb21f7150bec74a53aeafe62679",

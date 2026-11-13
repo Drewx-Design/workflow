@@ -27,7 +27,7 @@ I use and refine these tools in my Windows workflow. The sorter makes my priorit
 
 The published versions are sanitized reference snapshots, shared so others can inspect the decisions and adapt useful ideas. Their manifests identify the exported source revision. A short [usage note](results/2026-10-27.md) records activity from the deployed tools.
 
-The [November 3 workflow update](compound-engineering/README.md) adds how I keep implementations small, capture lessons before opening a PR, and evaluate Kimi on the final changes. Its [development notes](compound-engineering/README.md#development-notes) cover new sorter reporting and the work to narrow automatic cleanup, with their status separate from the published source kits.
+The [November 13 workflow update](compound-engineering/README.md) explains how I check that tests detect defects and use review evidence to choose model roles. The [Kimi evaluation note](results/2026-11-13-kimi.md) records the small trial behind its standing scope-review role. The sorter now has a [development example connecting priority to the next action](sorter/METHOD.md#from-priority-to-the-next-action-development-update). The cleanup folder preserves the earlier implementation, with a [description of its replacement](worktree-cleanup/CURRENT.md).
 
 ## Borrowing the ideas
 

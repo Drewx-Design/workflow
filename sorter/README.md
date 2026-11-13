@@ -43,6 +43,8 @@ I define the milestone and its anchors, decide unresolved product choices, and r
 
 I use the sorter to apply the milestone policy to my GitHub board. Its [usage note](../results/2026-10-27.md) records confirmed field changes. The formula expresses my prioritization preferences; its [tradeoffs and evaluation approach](METHOD.md#what-i-would-measure-next) explain how I would assess ranking quality.
 
+My newer development version also reports what needs to happen before work can start. The [next-action example](METHOD.md#from-priority-to-the-next-action-development-update) follows a valuable issue through definition, a product decision, and implementation readiness. That reporting and the accompanying workflow rules are newer than this source snapshot.
+
 ## Explore or adapt
 
 Built for my Windows 11 workflow. Borrow the method and adapt the assumptions; this is not a drop-in backlog service. [Tests, setup, credentials, commands, and scheduling](ADAPTING.md) are in the adaptation guide. The [sample milestone](examples/milestone-1.md) shows the input you would replace.

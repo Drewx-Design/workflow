@@ -4,6 +4,10 @@ A Claude Code skill that runs parallel Claude Code workers in [herdr](https://he
 
 One Claude session acts as coordinator. Given `start #12 #15 #18`, it opens a workspace, branch, and sibling worktree for each issue, starts workers in auto mode, and hands them their entry commands. A detached watcher follows progress and reports questions, finished PRs, stalls, and quota waits. Multiple coordinators can share a repository through separate, session-owned lanes.
 
+The November 11 update also lets a coordinator adopt a session started by hand. Adoption registers the session for supervision without sending it a new prompt. Its questions and completed turns then appear alongside the coordinator's other workers. See [adoption and session handling](SKILL.md).
+
+The watcher acknowledges routine bookkeeping silently and wakes the coordinator when something needs attention. Events from another coordinator's lane do not trigger the same wake. Turns I typed directly in a worker's pane are identified so the coordinator can avoid repeating an answer I have already seen. This keeps supervision useful as the number of sessions grows.
+
 ## Worked example
 
 Constructed illustration of the delivery tests, not a live worker conversation.
@@ -23,7 +27,7 @@ This avoids treating “I did not receive a confirmation” as “the worker did
 
 ## What I keep manual
 
-The coordinator does not perform the worker's task, answer product questions for me, or merge PRs. I supply decisions and authorize continuation after holds. Cleanup of merged work is available on request.
+The coordinator does not perform the worker's task, answer product questions for me, or merge PRs. I supply decisions and authorize continuation after holds. On request, it can close eligible finished worker sessions; it retains their worktrees for the separate [cleanup sweep](../worktree-cleanup/CURRENT.md).
 
 ## Implementation evidence
 
