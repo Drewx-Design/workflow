@@ -6,7 +6,7 @@ Before drafting anything, Grantsville checks how a funder accepts applications. 
 
 ## When it recommends skipping
 
-`buildQualificationVerdict` in [`src/route-copy.ts`](src/route-copy.ts) returns `recommendSkip: true` in three cases, and in no others:
+`buildQualificationVerdict` in [`src/route-copy.ts`](src/route-copy.ts) first sets aside government programs, which the check doesn't cover yet: they get "Not covered yet" and never a skip recommendation. For every other funder it returns `recommendSkip: true` in three cases, and in no others:
 
 | Case | Where the code decides it | Test |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ Before drafting anything, Grantsville checks how a funder accepts applications. 
 | The funder's quoted policy excludes fiscally sponsored applicants, and the organization uses a fiscal sponsor. | `classifyStopFact` in [`src/stop-facts.ts`](src/stop-facts.ts) | none in this excerpt |
 | The funder's quoted route is RFP-only, and there is no quoted window, or the first quoted window's text doesn't say open, active, or accepting. | `hasActiveRfp` and `buildQualificationVerdict` in [`src/route-copy.ts`](src/route-copy.ts) | `treats RFP-only as closed until a quoted active window is found` |
 
-A fact counts only when it carries both a quote and a source URL. An unquoted restriction never produces a skip.
+"Quoted" means the fact carries a quote, a source URL, and a value that isn't missing or `unknown`. Where a case reads the first quoted route or window, it means the first such fact; facts that fail this test are skipped. An unquoted restriction never produces a skip.
 
 `answerRequiresOverride` and `isStopFactSatisfied` in [`src/stop-facts.ts`](src/stop-facts.ts) classify which saved answers count as overriding a published restriction.
 
