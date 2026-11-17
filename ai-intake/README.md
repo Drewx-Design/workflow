@@ -4,7 +4,7 @@ I use this to turn findings from plans, audits, and agent work into GitHub issue
 
 A producer writes a structured candidate file with the outcome, evidence, and source identity. Intake checks that evidence, compares the candidate with existing work, and prepares a new issue, supporting evidence for an existing issue, or a hold. Models assess the material; validated execution plans and the transport determine what may be written.
 
-This folder keeps the design notes for a tool whose source is private: how it works, a worked example, and why it is built this way.
+This folder keeps the design notes for a tool whose source is private: how it works, a worked example, and why it is built this way. The [excerpt/](excerpt/) folder publishes the auto-close bar (`action-qualification.ts`) for reading.
 
 ## Worked example
 
