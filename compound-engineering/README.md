@@ -73,7 +73,7 @@ Useful lessons go into the existing Compound Engineering knowledge files with th
 
 ## Development notes
 
-These November 13 notes describe work in my development repositories. The sorter and cleanup source folders remain older snapshots; their newer behavior is described separately below.
+These November 13 notes describe work in my development repositories. The sorter and cleanup folders in this repository hold design notes; their source is private.
 
 **Sorter: explain selection, then follow the outcome.** New reporting has merged into the development repository. It explains why issues stayed out of the working set and follows considered work through eligibility, selection, confirmed board placement, and later outcomes. A replay can test whether removing a particular rule would have changed admission, while reporting the coverage of the evidence.
 
@@ -81,7 +81,7 @@ That gives me a way to investigate an apparently surprising ranking. A high scor
 
 The newer reporting also distinguishes work ready to build from work needing investigation, definition, or a product decision. The [next-action example](../sorter/METHOD.md#from-priority-to-the-next-action-development-update) shows how the same valuable issue moves toward implementation as its missing information is supplied. Automatic worker selection remains a separate development step.
 
-**Cleanup: make completion and recovery explicit.** I replaced the earlier storage-manager workflow with a machine-wide worktree sweep. Sessions can record a worktree's owner and mark their work done. The sweep checks whether a checkout can be removed and preserves eligible unfinished work on a local recovery branch, with instructions for restoring it. The [current approach](../worktree-cleanup/CURRENT.md) explains those decisions; the public source folder retains the earlier implementation.
+**Cleanup: make completion and recovery explicit.** I replaced the earlier storage-manager workflow with a machine-wide worktree sweep. Sessions can record a worktree's owner and mark their work done. The sweep checks whether a checkout can be removed and preserves eligible unfinished work on a local recovery branch, with instructions for restoring it. The [current approach](../worktree-cleanup/CURRENT.md) explains those decisions; the cleanup folder also describes the earlier implementation.
 
 **Coordinator: supervise sessions with fewer interruptions.** The November 11 public update can adopt sessions started by hand, keep workers attached to their own coordinator, and wake that coordinator for actionable events while acknowledging routine bookkeeping silently. The [overview](../herdr-coordinator/README.md) explains how I use those capabilities.
 
@@ -92,4 +92,4 @@ The newer reporting also distinguishes work ready to build from work needing inv
 - [Herdr coordinator](../herdr-coordinator/) supervises workers and brings questions back to the operator.
 - [Worktree cleanup](../worktree-cleanup/) checks activity and recovery conditions before removing abandoned checkouts.
 
-I built this setup for my own Windows workflow. Borrow the responsibility boundaries, review rules, or learning practices that fit your work, and adapt the tools to your environment. This page is a description of the method; the linked tool folders contain the published source and examples.
+I built this setup for my own workflow. Borrow the responsibility boundaries, review rules, or learning practices that fit your work, and adapt the tools to your environment. This page is a description of the method; the linked tool folders contain design notes and examples, and the coordinator folder also contains its source and tests.

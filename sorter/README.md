@@ -4,6 +4,8 @@ I built this to order a GitHub backlog against the next product milestone. A sev
 
 The sorter separates those questions. Two model families assess the evidence; deterministic code merges their assessments, compiles the working set, and prepares field changes. The code decides timing rather than asking a model to choose “Now”.
 
+This folder keeps the design notes for a tool whose source is private: how it works, a worked example, and why it is built this way. [How I sort issues](METHOD.md) has the full method.
+
 ## The ranking method
 
 For ordinary eligible product improvements:
@@ -27,13 +29,13 @@ Constructed illustration, not a customer result. Assume current evidence, no dep
 | Clarify the save confirmation | In scope, not blocking | 5 | Low | 10 | Now, after the higher-value improvement |
 | Add a second export format | Outside this milestone | 9 | Low | 32.4 | Parked despite the larger score |
 
-The intended outcome is a working set that supports the release, rather than a list sorted only by easy wins. [The implementation](scripts/lib/github-issue-roadmap/stewardship-backlog.ts) makes those exceptions inspectable.
+The intended outcome is a working set that supports the release, rather than a list sorted only by easy wins.
 
 ## Why it is built this way
 
-- **Separate value, severity, and scope.** An attractive feature is not automatically an emergency. An already-fixed issue is not automatically outside the milestone. These are different facts with different consequences. See the [assessment rubric](scripts/lib/github-issue-roadmap/stewardship-assessment.ts).
-- **Keep disagreement visible.** Value estimates are averaged, adjacent effort estimates resolve to the larger effort, and conflicting categories remain unknown. Missing evidence is not a low score. The [merge tests](scripts/__tests__/roadmap-stewardship-assessment.test.ts) cover these distinctions.
-- **Make reprioritization stable.** A new score alone does not evict current work. Explicit pins and verified emergencies have separate treatment. After a write timeout, the executor observes the result instead of blindly sending the write again. See [backlog compilation](scripts/lib/github-issue-roadmap/stewardship-backlog.ts) and [execution](scripts/lib/github-issue-roadmap/stewardship-executor.ts).
+- **Separate value, severity, and scope.** An attractive feature is not automatically an emergency. An already-fixed issue is not automatically outside the milestone. These are different facts with different consequences.
+- **Keep disagreement visible.** Value estimates are averaged, adjacent effort estimates resolve to the larger effort, and conflicting categories remain unknown. Missing evidence is not a low score.
+- **Make reprioritization stable.** A new score alone does not evict current work. Explicit pins and verified emergencies have separate treatment. After a write timeout, the executor observes the result instead of blindly sending the write again.
 
 ## What I keep manual
 
@@ -43,8 +45,8 @@ I define the milestone and its anchors, decide unresolved product choices, and r
 
 I use the sorter to apply the milestone policy to my GitHub board. Its [usage note](../results/2026-10-27.md) records confirmed field changes. The formula expresses my prioritization preferences; its [tradeoffs and evaluation approach](METHOD.md#what-i-would-measure-next) explain how I would assess ranking quality.
 
-My newer development version also reports what needs to happen before work can start. The [next-action example](METHOD.md#from-priority-to-the-next-action-development-update) follows a valuable issue through definition, a product decision, and implementation readiness. That reporting and the accompanying workflow rules are newer than this source snapshot.
+My newer development version also reports what needs to happen before work can start. The [next-action example](METHOD.md#from-priority-to-the-next-action-development-update) follows a valuable issue through definition, a product decision, and implementation readiness. That reporting and the accompanying workflow rules are newer than the version these notes first described.
 
 ## Explore or adapt
 
-Built for my Windows 11 workflow. Borrow the method and adapt the assumptions; this is not a drop-in backlog service. [Tests, setup, credentials, commands, and scheduling](ADAPTING.md) are in the adaptation guide. The [sample milestone](examples/milestone-1.md) shows the input you would replace.
+Borrow the method and adapt the assumptions; this is not a drop-in backlog service. The source, tests, and setup instructions are private. The [sample milestone](examples/milestone-1.md) shows the input the method works from.

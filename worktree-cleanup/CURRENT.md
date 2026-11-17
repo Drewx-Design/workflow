@@ -1,6 +1,6 @@
 # How I handle worktree cleanup now
 
-[Earlier source snapshot](README.md) · [Workflow method](../compound-engineering/README.md)
+[Earlier implementation](README.md) · [Workflow method](../compound-engineering/README.md)
 
 As of November 13, I use a machine-wide sweep in place of the earlier storage-manager workflow. It discovers repositories under configured roots and examines their registered worktrees. Agents mark finished work; the sweep owns removal. This keeps each worker from having to manage its own cleanup process.
 
@@ -20,4 +20,4 @@ Morning reports distinguish removals, cache clearing, preserved work, and holds.
 
 ## Borrowing the approach
 
-The useful pieces to adapt are explicit ownership, a completion signal, one place responsible for removal, and a documented recovery path. The source in this public folder is the earlier implementation. Its October usage counts and installation guide belong to that version; the replacement sweep has not yet been exported here.
+The useful pieces to adapt are explicit ownership, a completion signal, one place responsible for removal, and a documented recovery path. This folder keeps design notes only; the source of both the earlier implementation and the replacement sweep is private. The October usage counts belong to the earlier version.

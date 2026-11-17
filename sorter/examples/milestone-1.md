@@ -4,6 +4,8 @@ spec_version: 1
 
 # Milestone 1
 
+A sample of the milestone input the sorter's method works from. The sorter's source is private.
+
 Replace this example with the user outcome your next release must support.
 
 ## Steps

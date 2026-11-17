@@ -26,7 +26,7 @@ The prompt tells assessors to ignore existing Priority, Horizon, and Effort valu
 
 Effort anchors in this workflow are roughly half a day and one small change for low; a day or two and one PR for medium; and multiple PRs, cross-cutting work, migrations, or unclear design for high. Those are assessment anchors, not delivery promises.
 
-Source: [rubric and validation](scripts/lib/github-issue-roadmap/stewardship-assessment.ts).
+Implemented in the private sorter source as `stewardship-assessment.ts` (rubric and validation).
 
 ## 2. Merge judgments without concealing uncertainty
 
@@ -43,7 +43,7 @@ The current production seat pair named in the source is Codex and GLM. Separate 
 
 Additional source evidence is requested for specific reasons: a milestone blocker, a reported defect severity, an explicit need for code, an unresolved tier, or certain candidates entering the working set. Disagreement alone does not automatically buy another round of code collection. Unresolved product choices and completed or disproved work have escalation paths.
 
-Source: [merge and expansion rules](scripts/lib/github-issue-roadmap/stewardship-assessment.ts), [decision compiler](scripts/lib/github-issue-roadmap/stewardship-decision.ts), [constructed merge tests](scripts/__tests__/roadmap-stewardship-assessment.test.ts).
+Implemented in the private sorter source as `stewardship-assessment.ts` (merge and expansion rules) and `stewardship-decision.ts` (decision compiler), with constructed merge tests.
 
 ## 3. Give value more influence than ease
 
@@ -65,7 +65,7 @@ The implementation uses integer units internally to preserve half-step merged va
 
 This is a policy choice. Value is a judgment on a 1–10 scale, not a measured monetary quantity, so 12.8 does not mean a predicted return. Squaring also magnifies errors: assessors scoring the same issue 2 and 10 still merge to 6. The current code does not apply a value-disagreement penalty. That is a useful limitation to keep visible when reviewing the output.
 
-Source: [score and stored rank key](scripts/lib/github-issue-roadmap/stewardship-rank-key.ts).
+Implemented in the private sorter source as `stewardship-rank-key.ts` (score and stored rank key).
 
 ## 4. Build the working set around constraints
 
@@ -84,7 +84,7 @@ For formula ties, the comparator prefers an incumbent, lower effort, earlier mil
 
 Absent an override, flag, or other exception, remaining milestone blockers go to **Next**, in-scope nonblockers to **Later**, and outside-milestone work to **Parked**. The [worked backlog](README.md#worked-example) shows why an outside-milestone score of 32.4 can sit behind a blocker scoring 9.8.
 
-Source: [backlog compiler](scripts/lib/github-issue-roadmap/stewardship-backlog.ts), [rank key](scripts/lib/github-issue-roadmap/stewardship-rank-key.ts).
+Implemented in the private sorter source as `stewardship-backlog.ts` (backlog compiler) and `stewardship-rank-key.ts` (rank key).
 
 ## 5. Treat a proposal and a write as separate steps
 
@@ -92,7 +92,7 @@ The snapshot records the proposed field changes and their evidence. Execution va
 
 Horizon and Effort pins preserve operator choices. The Sort key is computed and sorter-owned. Lifecycle flags request attention to done or stale work rather than closing issues. These distinctions matter more than a superficially precise score.
 
-Source: [executor](scripts/lib/github-issue-roadmap/stewardship-executor.ts), [projection](scripts/lib/github-issue-roadmap/stewardship-projection.ts).
+Implemented in the private sorter source as `stewardship-executor.ts` (executor) and `stewardship-projection.ts` (projection).
 
 ## From priority to the next action: development update
 

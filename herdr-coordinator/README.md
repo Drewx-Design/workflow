@@ -35,4 +35,4 @@ The [fixture notes](tests/fixtures/README.md) document real producer behavior th
 
 ## Explore or adapt
 
-Built and run on Windows 11. Borrow the coordination patterns and adapt the tool and workflow assumptions. [Requirements, installation, tests, state locations, and recovery](ADAPTING.md) are in the adaptation guide.
+This snapshot was built and run on Windows 11; I now work on macOS. Borrow the coordination patterns and adapt the tool and workflow assumptions. [Requirements, installation, tests, state locations, and recovery](ADAPTING.md) are in the adaptation guide.

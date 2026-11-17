@@ -1,8 +1,10 @@
 # Workflow
 
-Tools for my personal AI coding workflow. I use agents to investigate and implement changes. That creates coordination work of its own: findings need to become actionable issues, the backlog needs an order, workers need supervision, and unfinished work needs preserving.
+Evidence for specific claims in my portfolio, not a mirror of my working tools.
 
-These tools handle those recurring tasks. They form a working loop, with human decisions between the stages:
+These notes cover my personal AI coding workflow. I use agents to investigate and implement changes. That creates coordination work of its own: findings need to become actionable issues, the backlog needs an order, workers need supervision, and unfinished work needs preserving.
+
+Four tools handle those recurring tasks. They form a working loop, with human decisions between the stages:
 
 **Findings → AI intake → issue backlog → sorter → coordinator → worktrees → cleanup**
 
@@ -21,22 +23,22 @@ For the method behind these tools, read **[How I use Compound Engineering](compo
 
 ## How I divide the work
 
-Models assess evidence and propose actions. Code checks what those actions are allowed to change, records attempts, and checks the result. I keep product choices, milestone definitions, exceptional approvals, and merges with the operator. The individual READMEs explain those boundaries and link to source and tests.
+Models assess evidence and propose actions. Code checks what those actions are allowed to change, records attempts, and checks the result. I keep product choices, milestone definitions, exceptional approvals, and merges with the operator. The individual READMEs explain those boundaries. The coordinator's README also links to its source and tests.
 
 The sorter makes one of my tradeoffs explicit: **value gets more weight than ease, milestone blockers get special treatment, and a new score alone does not churn the current working set.** Its [method](sorter/METHOD.md) includes the arithmetic, model agreement rules, capacity limits, and a worked backlog.
 
 ## In use
 
-I use and refine these tools in my Windows workflow. The sorter makes my prioritization rules explicit. Intake carries evidence and acceptance criteria into the backlog. The coordinator manages worker handoffs, and cleanup checks activity and recovery conditions before removing a checkout.
+I use and refine these tools in my own development workflow. The sorter makes my prioritization rules explicit. Intake carries evidence and acceptance criteria into the backlog. The coordinator manages worker handoffs, and cleanup checks activity and recovery conditions before removing a checkout.
 
-The published versions are sanitized reference snapshots, shared so others can inspect the decisions and adapt useful ideas. Their manifests identify the exported source revision. A short [usage note](results/2026-10-27.md) records activity from the deployed tools.
+Of these tools, only the coordinator is published with its source and tests, as a sanitized reference snapshot. Intake, the sorter and cleanup are published as design notes; their source is private. A short [usage note](results/2026-10-27.md) records activity from the deployed tools.
 
-The [November 13 workflow update](compound-engineering/README.md) explains how I check that tests detect defects and use review evidence to choose model roles. The [Kimi evaluation note](results/2026-11-13-kimi.md) records the small trial behind its standing scope-review role. The sorter now has a [development example connecting priority to the next action](sorter/METHOD.md#from-priority-to-the-next-action-development-update). The cleanup folder preserves the earlier implementation, with a [description of its replacement](worktree-cleanup/CURRENT.md).
+The [November 13 workflow update](compound-engineering/README.md) explains how I check that tests detect defects and use review evidence to choose model roles. The [Kimi evaluation note](results/2026-11-13-kimi.md) records the small trial behind its standing scope-review role. The sorter now has a [development example connecting priority to the next action](sorter/METHOD.md#from-priority-to-the-next-action-development-update). The cleanup folder describes the earlier implementation, with a [description of its replacement](worktree-cleanup/CURRENT.md).
 
 ## Borrowing the ideas
 
-I built these for my own workflow on **Windows 11**. I'm sharing them so you can borrow the ideas, learn from the decisions, and adapt useful parts. They aren't designed to be copied directly into another setup: they assume particular tools, repository conventions, and ways of working.
+I built these for my own workflow. I'm sharing them so you can borrow the ideas, learn from the decisions, and adapt useful parts. They aren't designed to be copied directly into another setup: they assume particular tools, repository conventions, and ways of working.
 
-Each tool folder has an overview, worked example, source, tests, and an adaptation guide. The three newer source kits use `example-org/example-repo` and `example-user`. They omit credentials, personal settings, private captures, and live operational journals. Their examples and included tests use constructed data; the coordinator also has documented, sanitized producer captures. The usage note contains aggregate counts; raw journals and private issue text remain private.
+Each tool folder has an overview and a worked example. The coordinator folder also has its source, tests, and an adaptation guide. Its tests use constructed data and documented, sanitized producer captures. The usage note contains aggregate counts; raw journals and private issue text remain private.
 
-Installing dependencies does not schedule jobs or enable GitHub writes. Start with the overview, then follow the adaptation guide for a tool you want to explore.
+Start with a tool's overview. For the coordinator, follow its adaptation guide; installing its dependencies does not schedule jobs or enable GitHub writes.
