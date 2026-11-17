@@ -1,0 +1,11 @@
+{
+  "sourceCommit": "d9d56c18c1002bd14074f1f8600196c475499fbe",
+  "files": {
+    "README.md": "8248b920ddbf66f8bdbde7122093bd9300e6a65a9fc37de21d00995ea20c3af2",
+    "action-qualification.ts": "b3682a4a3c84b0ed387b3dcaff356407fe998ada4ce70b3cb894a2048a3f3243"
+  },
+  "excluded": [
+    "the rest of the private intake codebase, including the modules this file imports and its tests"
+  ],
+  "adaptations": []
+}
