@@ -1,9 +1,10 @@
 {
   "sourceCommit": "ebf1244c7ee067b8842b06c7e9f06691f68ecc84",
   "files": {
-    "README.md": "2d615f198d36a8aca9ae680232075811478a648985b951bb16f38fb7bb512ae5",
+    "README.md": "ccca042fb7c9e4953d287ccf575ddbd56f62d14d37c489d197170106a2fe300d",
     "package-lock.json": "88cf3a3199596d802139004938512a5b6722eda64787712961ff21b81c35cb70",
     "package.json": "f6374c6756d99aaf42b2c3538298dd91547e0dd7d13d411d3fe980e716879730",
+    "src/__tests__/fiscal-sponsor.test.ts": "99d64068724afc6d96b26161f922f547af8741e586ee9cfab8456e0fe8f729b5",
     "src/__tests__/route-copy.test.ts": "844f472021b1ad373e2f4be759e66054b83568ea68be159ed3c3f0c7d4212444",
     "src/route-copy.ts": "0a6d56b04a0ecac0f0572fc328fc5a7680cf684251c58aa10ac4ba50416537c7",
     "src/stop-facts.ts": "34a47a801196b459617d403dcc688acb1d7cee81303f44c64016de6c5784c692",
@@ -16,6 +17,7 @@
   "adaptations": [
     "Imports pointed at local files instead of private module paths",
     "Comments citing private planning documents by ID replaced with what they decided",
-    "Type declarations written locally for the fields the modules read"
+    "Type declarations written locally for the fields the modules read",
+    "A fiscal-sponsor exclusion test written for this excerpt"
   ]
 }
