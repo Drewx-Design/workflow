@@ -15,6 +15,10 @@ These tools handle those recurring tasks. They form a working loop, with human d
 
 For the method behind these tools, read **[How I use Compound Engineering](compound-engineering/README.md)**: how I divide model responsibilities, review changes, keep product scope explicit, and improve the workflow from experience.
 
+## Product code excerpt
+
+[Grantsville funder check](grantsville-funder-check/) is not a workflow tool. It is a read-only excerpt of product code from Grantsville, my grant-application tool for small nonprofits: the rule that decides when its funder check recommends not applying, with its tests.
+
 ## How I divide the work
 
 Models assess evidence and propose actions. Code checks what those actions are allowed to change, records attempts, and checks the result. I keep product choices, milestone definitions, exceptional approvals, and merges with the operator. The individual READMEs explain those boundaries and link to source and tests.
