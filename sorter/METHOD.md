@@ -4,7 +4,7 @@
 
 I want a backlog to answer two questions: what matters for the next milestone, and what should occupy the limited working set now? A score helps with the first comparison, but cannot answer the second on its own.
 
-This describes the ranking path in the published source. Older assessment contracts remain for replay compatibility; they are not the method described here.
+This describes the ranking method implemented in my private development repository. Older assessment contracts remain for replay compatibility; they are not the method described here.
 
 ## 1. Start with a milestone, not existing labels
 
@@ -96,19 +96,21 @@ Implemented in the private sorter source as `stewardship-executor.ts` (executor)
 
 ## From priority to the next action: development update
 
-As of November 13, the newer development version also reports whether an issue is ready to build and what is missing when it is not. These reports and the following workflow rules are newer than the source exported here.
+As of November 24, the development version reports whether an issue is ready to build and what is missing when it is not. A ready-list command also supplies the coordinator's fixer lane. These are design notes; the source is private.
 
 Consider “Resume an interrupted draft,” valued at 8 against the milestone, with high effort. Its score is 12.8. This constructed example follows the same request as its definition improves:
 
 | What is known | Useful next action |
 | --- | --- |
-| The desired outcome is clear, but there are no checkable acceptance criteria. | Define the expected behavior before assigning implementation. |
+| The desired outcome is clear, but there are no checkable acceptance criteria. | Define the expected behavior before building. An eligible fixer worker writes missing criteria into its plan first. |
 | Criteria exist, but whether to restore unsaved edits remains an unresolved product choice. | Bring that decision to me. A score cannot settle it. |
-| The decision is settled, criteria and repository evidence are available, the issue is build-ready, and it belongs in Now or Next. | Use the recommended implementation or debugging entry command. |
+| The decision is settled, criteria and repository evidence are available, and the live issue still qualifies as build-ready. | Use the recommended implementation or debugging entry command. |
 
-The reporting keeps work needing investigation, definition, scope resolution, or a decision in a next-action queue. My worker-ready rule additionally requires acceptance criteria, a suitable start command, and no unresolved product decision. Intake carries authored criteria and repository paths into the issue; the sorter does not invent criteria to make an issue appear ready.
+The reporting keeps work needing investigation, definition, scope resolution, or a decision in a next-action queue. Intake carries authored criteria and repository paths into the issue. The sorter does not invent criteria to make an issue appear ready; a worker handles missing criteria before building and brings product decisions back to me.
 
-This gives the score a practical role: compare valuable work while showing what must happen before it can be assigned. A future automatic worker picker must follow that rule. The preparation-only docket already implemented in the development repository does not open branches or PRs or schedule workers. Broader automated starts require my decision to advance from reading, to suggesting, to drafting, to acting with confirmation.
+On November 17, I authorized a fixer lane to advance eligible issues to draft PRs. It reads Now, then Next, then Later, ordered within each by the sorter's key. Before a start, it checks the live issue against the compiled evidence and skips existing workers, open PRs, or conflicting manual choices. It does not select Parked or Inbox work. The [coordinator notes](../herdr-coordinator/README.md#newer-development-workflow) explain its capacity, review limit, and human decisions.
+
+This gives the score a practical role: compare valuable work, show what is missing, and supply bounded implementation work for review. The earlier preparation-only docket remains a separate path; its existence alone never grants permission to start workers.
 
 The newer code-verification path for “Review done” has also merged, but its activation gate remains closed pending validation. It should not be read as an enabled automatic issue closer.
 

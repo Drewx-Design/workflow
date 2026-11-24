@@ -33,6 +33,18 @@ The coordinator does not perform the worker's task, answer product questions for
 
 The [fixture notes](tests/fixtures/README.md) document real producer behavior that shaped the implementation, including question forms appearing differently across Claude Code versions. Tests combine sanitized captures with constructed scenarios. Producer-format changes require corresponding integration maintenance.
 
+## Newer development workflow
+
+As of November 24, my private development version adds a standing fixer lane and a decision panel. The source in this folder remains the November 11 snapshot; the additions below are not included in it.
+
+**From ranked issue to draft PR.** The fixer lane reads the sorter's ready list and starts up to three workers within the repository's shared capacity. Each start rechecks the live issue and excludes work already claimed or linked to an open PR. Workers use the normal implementation or debugging workflow, add missing acceptance criteria before building, and finish with draft PRs and tests. They ask before building UI. I decide product questions and review and merge the result.
+
+The lane stops starting work when four fixer PRs are waiting, or when it cannot read their state. Workers already running can finish, so four is a start threshold rather than a hard cap on waiting PRs. It fills on session start and coordinator events, without a polling timer. When switching computers, the old computer's workers must finish or stop before the new one starts selecting work.
+
+**A recommendation with the question.** Each coordinator has a short brief describing the lane's outcomes, deferred work, and decisions that need me. It can settle routine technical questions within that scope. For a decision that needs me, it supplies a recommendation and reason in the worker's session. A read-only panel groups pending decisions across repositories owned by that coordinator and lets me jump to the relevant session.
+
+The fixer lane is being evaluated through its initial starts and review outcomes. These notes describe implemented selection and supervision behavior, not a measured increase in completed work.
+
 ## Explore or adapt
 
 This snapshot was built and run on Windows 11; I now work on macOS. Borrow the coordination patterns and adapt the tool and workflow assumptions. [Requirements, installation, tests, state locations, and recovery](ADAPTING.md) are in the adaptation guide.

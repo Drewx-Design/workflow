@@ -2,7 +2,9 @@
 
 [Earlier implementation](README.md) · [Workflow method](../compound-engineering/README.md)
 
-As of November 13, I use a machine-wide sweep in place of the earlier storage-manager workflow. It discovers repositories under configured roots and examines their registered worktrees. Agents mark finished work; the sweep owns removal. This keeps each worker from having to manage its own cleanup process.
+As of November 24, the replacement sweep also has a macOS implementation and nightly LaunchAgent configuration. It discovers repositories under configured roots and examines their registered worktrees. Agents mark finished work; the sweep owns removal. This keeps each worker from having to manage its own cleanup process.
+
+The shared configuration repository now contains the sweep and coordinator histories. The Mac schedule is set for 03:30 and does not run just because the user logs in. This public folder describes the decisions and recovery approach; the implementations remain private.
 
 ## Completion and recovery
 

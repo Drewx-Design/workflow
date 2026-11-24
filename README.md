@@ -17,6 +17,8 @@ Four tools handle those recurring tasks. They form a working loop, with human de
 
 For the method behind these tools, read **[How I use Compound Engineering](compound-engineering/README.md)**: how I divide model responsibilities, review changes, keep product scope explicit, and improve the workflow from experience.
 
+For the research that comes before a change, read [How I investigate product workflows](product-investigation/README.md): choose a bounded question, follow an action through its saved result, and leave evidence another session can use.
+
 ## Product code excerpt
 
 [Grantsville funder check](grantsville-funder-check/) is not a workflow tool. It is a read-only excerpt of product code from Grantsville, my grant-application tool for small nonprofits: the rule that decides when its funder check recommends not applying, with its tests.
@@ -29,15 +31,15 @@ The sorter makes one of my tradeoffs explicit: **value gets more weight than eas
 
 ## In use
 
-I use and refine these tools in my own development workflow. The sorter makes my prioritization rules explicit. Intake carries evidence and acceptance criteria into the backlog. The coordinator manages worker handoffs, and cleanup checks activity and recovery conditions before removing a checkout.
+I use and refine this workflow across Windows and macOS. The sorter makes my prioritization rules explicit. Intake carries evidence and acceptance criteria into the backlog. The coordinator manages worker handoffs, and cleanup checks activity and recovery conditions before removing a checkout.
 
-Of these tools, only the coordinator is published with its source and tests, as a sanitized reference snapshot. Intake, the sorter and cleanup are published as design notes; their source is private. A short [usage note](results/2026-10-27.md) records activity from the deployed tools.
+The coordinator is published with its source and tests as a sanitized reference snapshot. Intake, the sorter and cleanup are published as design notes; their full implementations are private. Intake also includes a [read-only excerpt of its automatic-action qualification rules](ai-intake/excerpt/README.md). A short [usage note](results/2026-10-27.md) records activity from the deployed tools.
 
-The [November 13 workflow update](compound-engineering/README.md) explains how I check that tests detect defects and use review evidence to choose model roles. The [Kimi evaluation note](results/2026-11-13-kimi.md) records the small trial behind its standing scope-review role. The sorter now has a [development example connecting priority to the next action](sorter/METHOD.md#from-priority-to-the-next-action-development-update). The cleanup folder describes the earlier implementation, with a [description of its replacement](worktree-cleanup/CURRENT.md).
+The [November 24 workflow update](compound-engineering/README.md) explains how I keep rules in one authoritative place and revise model assignments using evidence. A [five-task worker replay](results/2026-11-24-worker-selection.md) informed the latest routine model setting. The [coordinator's development notes](herdr-coordinator/README.md#newer-development-workflow) describe a fixer lane that selects eligible issues and ends at draft PRs for my review. The cleanup folder describes the earlier implementation and [its replacement](worktree-cleanup/CURRENT.md).
 
 ## Borrowing the ideas
 
-I built these for my own workflow. I'm sharing them so you can borrow the ideas, learn from the decisions, and adapt useful parts. They aren't designed to be copied directly into another setup: they assume particular tools, repository conventions, and ways of working.
+I originally built these for my own workflow on **Windows 11** and now also work on macOS. The published coordinator snapshot retains its Windows assumptions. I'm sharing the methods so you can borrow the ideas, learn from the decisions, and adapt useful parts. They aren't designed to be copied directly into another setup: they assume particular tools, repository conventions, and ways of working.
 
 Each tool folder has an overview and a worked example. The coordinator folder also has its source, tests, and an adaptation guide. Its tests use constructed data and documented, sanitized producer captures. The usage note contains aggregate counts; raw journals and private issue text remain private.
 

@@ -4,7 +4,7 @@
 
 I use Compound Engineering to move from a product question to a reviewed change. My adaptations divide responsibilities between models, keep implementation within the agreed scope, and carry useful lessons into the next task. I define the product goals and make the decisions that need my judgment.
 
-The underlying method and plugin come from [Compound Engineering, maintained by Kieran Klaassen and Trevin Chow](https://every.to/guides/compound-engineering). This page describes my configuration and working rules as of **November 13, 2026**. The tools elsewhere in this repository support that workflow; the [development notes](#development-notes) distinguish recent work from the published source snapshots.
+The underlying method and plugin come from [Compound Engineering, maintained by Kieran Klaassen and Trevin Chow](https://every.to/guides/compound-engineering). This page describes the workflow recorded in my private configuration repository as of **November 24, 2026**. The tools elsewhere in this repository support that workflow; the [development notes](#development-notes) distinguish recent work from the published source snapshots.
 
 ## From question to working product
 
@@ -23,11 +23,11 @@ These are my configured roles, rather than a general ranking of models:
 | Brainstorming, substantial plans, orchestration, and synthesis | Claude | Does the proposed work serve the product goal? |
 | Repository research, implementation, debugging, and most code review | Codex | Does the approach fit the actual code, and does the change work? |
 | Consequential architecture and readiness checks | Codex Astra | Is there a material implementation or release problem? |
-| Unresolved design and interaction choices | Claude Fable 5.1 | Which alternative best serves the user, and what evidence could reverse that choice? |
+| Unresolved design and interaction choices | Claude Fable 5.2 | Which alternative best serves the user, and what evidence could reverse that choice? |
 | Premise and risk review | GLM-5.3 | Which assumption, failure case, or alternative has been missed? |
 | Advisory scope review of substantial UI plans and final UI changes | Kimi K3.1 Pro | Does the work add unrequested interface elements or omit required ones? |
 
-Routine detached Codex workers currently request `gpt-6.1-sol` at `xhigh`; senior checkpoints request `gpt-6-astra`, with `high` for implementation and debugging or `xhigh` for review. These are dated settings. The routine allocation remains provisional while a planned comparison is pending.
+The current configuration requests `gpt-6.2-sol` at `high` for routine detached workers and `gpt-6.2-astra` for senior checkpoints, with `high` for implementation and debugging or `xhigh` for review. The November 20 routine-model decision followed a [replay of five past implementation tasks](../results/2026-11-24-worker-selection.md). These are requested settings; the records distinguish them from any model identity the service can verify.
 
 If Claude is unavailable, Codex can fill its planning and synthesis roles, with the substitution recorded and a separate GLM review for substantial plans. A second model from the same family is still same-family review.
 
@@ -37,11 +37,13 @@ On November 12, I made Kimi scope review a standing advisory role. At the initia
 
 The role now covers substantial UI plans before implementation and the final UI diff after review and fixes. It asks which controls, messages, states, or behaviors exceed the request and which required elements are missing. Each applicable PR records the audit or why it was not run.
 
-I track confirmed findings, false flags, and verification time. The [evaluation note](../results/2026-11-13-kimi.md) gives the checkpoint's scope and examples, including the mixed results from later runs. Kimi's findings remain advisory and must be checked against the plan and source. I will review its usefulness after ten more counted runs.
+I track confirmed findings, false flags, and verification time. The [November 13 evaluation note](../results/2026-11-13-kimi.md) preserves that checkpoint and examples. Subsequent calls are recorded separately; the initial four-of-five result is not a current aggregate. Kimi's findings remain advisory and must be checked against the plan and source.
 
 ## Rules that shape the work
 
 **Choose the smallest adequate solution.** Before dividing a substantial change into implementation units, I ask what it must handle, what can stay with a person, and when it should stop. A new retry, queue, fallback, or safeguard needs a requirement from me or the task, or a concrete failure case. Narrowing the scope or leaving an uncertain case for inspection can be the better response. Reviewers distinguish observed problems from hypothetical ones; tests and verification still apply.
+
+**Give each rule one home.** A correction belongs where the next relevant task will encounter it: a shared instruction, a repository rule, a skill, or a cheap executable check. I edit or remove the existing wording before adding another rule. A ledger distinguishes rules enforced by checks from guidance that depends on the model following it. New workflow machinery must replace or combine something, or explain why nothing can be retired.
 
 **Settle disagreements with evidence.** Product alignment, implementation readiness, and architectural risk receive separate verdicts. Reviewers see the same frozen plan without each other's conclusions. A source-level finding needs a response grounded in code, tests, traces, or the agreed behavior; agreement between models does not settle it.
 
@@ -65,25 +67,27 @@ The resulting rule is specific: use the design reviewer when a consequential des
 
 My November 3 update puts the learning attempt before the PR opens when the work exposed an incorrect debugging hypothesis or an addition outside the plan. The PR records the saved lesson or the reason there was nothing durable to keep. This keeps the learning close to the work that produced it.
 
-Product inspection at merge is where I can add my own corrections and preferences. Only a preference I actually state can become guidance; approving a PR does not imply that I want every choice in it repeated.
+Product inspection at merge is where I can add my own corrections and preferences. Only a preference I actually state can become guidance; approving a PR does not imply that I want every choice in it repeated. My November update routes a correction to the instruction at the stage that should have prevented the miss. Project memory keeps state and references, rather than accumulating competing copies of behavioral rules.
 
 The weekly explanation of recently merged work and the five-UI-PR trial of an additional exploratory product check remain part of the October 28 update. Explanations help me understand the mechanisms I am delegating. The trial asks whether the extra check finds something existing review and user testing miss. These practices are still being evaluated.
 
-Useful lessons go into the existing Compound Engineering knowledge files with their context and rationale. A routine change may produce no reusable lesson. The aim is to make the next relevant task easier without filling the instructions with rules that apply everywhere.
+Solved-problem notes retain their context and rationale in the existing knowledge files. A routine change may produce no reusable lesson. The aim is to make the next relevant task easier without filling the instructions with rules that apply everywhere.
+
+Before implementation, I also use a [bounded product-investigation method](../product-investigation/README.md). It follows a user action through the saved result and later reuse, preserves the evidence, and connects a finding to existing work. Continuing research does not itself authorize a product change.
 
 ## Development notes
 
-These November 13 notes describe work in my development repositories. The sorter and cleanup folders in this repository hold design notes; their source is private.
+These November 24 notes describe work in my development repositories. Intake, the sorter, and cleanup are published here as design notes; the coordinator also has a dated source snapshot. The current configuration, scripts, and shared skills are maintained in a private repository. These pages summarize selected methods without exporting personal settings or project memory.
 
 **Sorter: explain selection, then follow the outcome.** New reporting has merged into the development repository. It explains why issues stayed out of the working set and follows considered work through eligibility, selection, confirmed board placement, and later outcomes. A replay can test whether removing a particular rule would have changed admission, while reporting the coverage of the evidence.
 
-That gives me a way to investigate an apparently surprising ranking. A high score can still sit outside Now because the work lacks definition, falls outside the milestone, or has no available slot. The [published method](../sorter/METHOD.md) explains those tradeoffs; the newer reports make their effects inspectable. The first outcome scorecard establishes a baseline. Its follow-up window is still maturing; ranking quality and delivery effects remain to be measured.
+That gives me a way to investigate an apparently surprising ranking. A high score can still sit outside Now because the work lacks definition, falls outside the milestone, or has no available slot. The [published method](../sorter/METHOD.md) explains those tradeoffs; the newer reports make their effects inspectable. The first outcome scorecard established a baseline. No updated ranking-quality or delivery-effect measurement is published here.
 
-The newer reporting also distinguishes work ready to build from work needing investigation, definition, or a product decision. The [next-action example](../sorter/METHOD.md#from-priority-to-the-next-action-development-update) shows how the same valuable issue moves toward implementation as its missing information is supplied. Automatic worker selection remains a separate development step.
+The newer reporting also distinguishes work ready to build from work needing investigation, definition, or a product decision. The [next-action example](../sorter/METHOD.md#from-priority-to-the-next-action-development-update) shows how the same valuable issue moves toward implementation. A standing fixer lane now connects eligible work to workers that finish with draft PRs. Its [limits](../herdr-coordinator/README.md#newer-development-workflow) keep review and merge with me.
 
 **Cleanup: make completion and recovery explicit.** I replaced the earlier storage-manager workflow with a machine-wide worktree sweep. Sessions can record a worktree's owner and mark their work done. The sweep checks whether a checkout can be removed and preserves eligible unfinished work on a local recovery branch, with instructions for restoring it. The [current approach](../worktree-cleanup/CURRENT.md) explains those decisions; the cleanup folder also describes the earlier implementation.
 
-**Coordinator: supervise sessions with fewer interruptions.** The November 11 public update can adopt sessions started by hand, keep workers attached to their own coordinator, and wake that coordinator for actionable events while acknowledging routine bookkeeping silently. The [overview](../herdr-coordinator/README.md) explains how I use those capabilities.
+**Coordinator: spend my attention on decisions.** The newer development version gives each lane a brief naming its outcomes and authority. The coordinator resolves routine questions within that scope and brings decisions that need me with a recommendation. A read-only panel collects those decisions across the repositories owned by the same coordinator. The [overview](../herdr-coordinator/README.md) distinguishes this from the November 11 public code snapshot.
 
 ## How the tools fit
 
@@ -92,4 +96,4 @@ The newer reporting also distinguishes work ready to build from work needing inv
 - [Herdr coordinator](../herdr-coordinator/) supervises workers and brings questions back to the operator.
 - [Worktree cleanup](../worktree-cleanup/) checks activity and recovery conditions before removing abandoned checkouts.
 
-I built this setup for my own workflow. Borrow the responsibility boundaries, review rules, or learning practices that fit your work, and adapt the tools to your environment. This page is a description of the method; the linked tool folders contain design notes and examples, and the coordinator folder also contains its source and tests.
+I built this setup first on Windows and now also work on macOS. Borrow the responsibility boundaries, review rules, or learning practices that fit your work, and adapt the tools to your environment. The linked tool folders contain design notes and examples; the coordinator folder also contains its source and tests.
