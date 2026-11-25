@@ -37,6 +37,8 @@ The coordinator is published with its source and tests as a sanitized reference 
 
 The [November 24 workflow update](compound-engineering/README.md) explains how I keep rules in one authoritative place and revise model assignments using evidence. A [five-task worker replay](results/2026-11-24-worker-selection.md) informed the latest routine model setting. The [coordinator's development notes](herdr-coordinator/README.md#newer-development-workflow) describe a fixer lane that selects eligible issues and ends at draft PRs for my review. The cleanup folder describes the earlier implementation and [its replacement](worktree-cleanup/CURRENT.md).
 
+The latest [Windows/macOS migration](compound-engineering/README.md#moving-the-workflow-across-operating-systems) brings the worker runner, sweep, guard hooks, and API helpers into shared implementations. Its merged PRs passed CI on both systems; switching the live machines remains separate rollout work.
+
 ## Borrowing the ideas
 
 I originally built these for my own workflow on **Windows 11** and now also work on macOS. The published coordinator snapshot retains its Windows assumptions. I'm sharing the methods so you can borrow the ideas, learn from the decisions, and adapt useful parts. They aren't designed to be copied directly into another setup: they assume particular tools, repository conventions, and ways of working.

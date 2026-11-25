@@ -2,9 +2,9 @@
 
 [Earlier implementation](README.md) · [Workflow method](../compound-engineering/README.md)
 
-As of November 24, the replacement sweep also has a macOS implementation and nightly LaunchAgent configuration. It discovers repositories under configured roots and examines their registered worktrees. Agents mark finished work; the sweep owns removal. This keeps each worker from having to manage its own cleanup process.
+As of November 24, the replacement sweep has a shared Windows/macOS implementation, with operating-system differences collected in one module. It discovers repositories under configured roots and examines their registered worktrees. Agents mark finished work; the sweep owns removal. This keeps each worker from having to manage its own cleanup process.
 
-The shared configuration repository now contains the sweep and coordinator histories. The Mac schedule is set for 03:30 and does not run just because the user logs in. This public folder describes the decisions and recovery approach; the implementations remain private.
+The shared configuration repository contains both a Windows Task Scheduler installer and a macOS LaunchAgent configuration, each set for 03:30. Registering the Windows task does not run it; the Mac schedule does not run at login. The merged migration passed its Windows and macOS CI jobs. Activating the shared version on both computers and completing live checks remain separate rollout work. The [migration note](../compound-engineering/README.md#moving-the-workflow-across-operating-systems) describes the verification boundary. This public folder keeps design notes; the implementations remain private.
 
 ## Completion and recovery
 

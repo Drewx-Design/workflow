@@ -89,6 +89,16 @@ The newer reporting also distinguishes work ready to build from work needing inv
 
 **Coordinator: spend my attention on decisions.** The newer development version gives each lane a brief naming its outcomes and authority. The coordinator resolves routine questions within that scope and brings decisions that need me with a recommendation. A read-only panel collects those decisions across the repositories owned by the same coordinator. The [overview](../herdr-coordinator/README.md) distinguishes this from the November 11 public code snapshot.
 
+### Moving the workflow across operating systems
+
+The November 24 migration changes bring the worker runner, cleanup sweep, and three guard hooks into shared implementations for Windows and macOS. The sweep isolates operating-system differences in one module. Five API-backed skills also share a bash helper per skill, with credentials read through the appropriate local store. An existing PowerShell entry point remains where another workflow still depends on it.
+
+The migration preserves the same workflow rules on both systems. For example, two scope guards imported a Unix-only locking module and would have stopped enforcing their rules on Windows. The change adds platform-specific locking and tests for both systems. Review also corrected a planned Windows cancellation command to preserve the existing restriction against stopping unrelated processes.
+
+Both migration PRs passed their Windows and macOS CI jobs. The workflow now treats failures in the configured Windows suites as errors; earlier migration stages had temporarily reported some of them without failing the job. Two tests of Mac Keychain entry points remain Mac-only. This is evidence that the shared implementation passes the configured checks. Switching both computers to that implementation and completing the live checks remain separate rollout work.
+
+These details were checked against the private repository's merged code, CI configuration, PR checks, and review records at revision `30321b2`. They describe the newer implementation; the public coordinator source remains the November 11 snapshot.
+
 ## How the tools fit
 
 - [AI intake](../ai-intake/) carries source evidence and acceptance criteria from findings into issues.
